@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Paint Cube: Professional Edition</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050505;
+            font-family: 'Segoe UI', sans-serif;
+        }
+
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 20px;
+            border-radius: 12px;
+            pointer-events: none;
+            border: 1px solid #444;
+        }
+
+        .stat-label {
+            font-size: 0.8em;
+            color: #aaa;
+            text-transform: uppercase;
+        }
+
+        .stat-val {
+            font-weight: bold;
+            font-size: 1.4em;
+            display: block;
+            margin-bottom: 10px;
+        }
+
+        #msg-overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            text-align: center;
+            display: none;
+            background: rgba(0, 0, 0, 0.95);
+            padding: 50px;
+            border-radius: 24px;
+            z-index: 10;
+            border: 2px solid #fff;
+        }
+
+        button {
+            padding: 12px 30px;
+            font-size: 1.1em;
+            cursor: pointer;
+            background: #fff;
+            border: none;
+            border-radius: 8px;
+            font-weight: bold;
+        }
+
+        .controls-hint {
+            font-size: 0.8em;
+            color: #888;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        <div style="font-size: 1.6em; margin-bottom: 10px;">STAGE <span id="stage-num">1</span></div>
+        <span class="stat-label">立方体のペンキ残量</span>
+        <span id="paint-status" class="stat-val">6</span>
+        <span class="stat-label">床の塗り状況</span>
+        <span class="stat-val"><span id="progress">0</span> / <span id="total-tiles">0</span></span>
+        <div class="controls-hint">操作: WASD または 矢印キー</div>
+    </div>
+
+    <div id="msg-overlay">
+        <h1 id="msg-title">STAGE CLEAR!</h1>
+        <button id="next-btn">NEXT STAGE</button>
+    </div>
+
+    <script type="importmap">
+        { "imports": { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } } }
+    </script>
+    <script type="module">
+        import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+        const STAGES = [
+            { w: 5, h: 5, color: 0x44ff44 }, // 緑
+            { w: 5, h: 6, color: 0xffff44 }, // 黄
+            { w: 6, h: 6, color: 0xff4444 }, // 赤
+            { w: 6, h: 7, color: 0xff44ff }, // 紫
+            { w: 7, h: 7, color: 0x4444ff }, // 青
+            { w: 7, h: 8, color: 0x44ffff }, // 水色
+            { w: 8, h: 8, color: 0xffffff }  // 白
+        ];
+
+        let currentIdx = 0, gridW, gridH, paintColor, totalTilesCount;
+        let cube, facePaintStatus, paintRemaining, isAnimating = false, isGameOver = false;
+        let paintedTiles = new Map();
+        let gridHelper, stageOutline;
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(10, 20, 10);
+        scene.add(dirLight);
+
+        const pivot = new THREE.Object3D();
+        scene.add(pivot);
+
+        function initStage(idx) {
+            if (cube) scene.remove(cube);
+            paintedTiles.forEach(tile => scene.remove(tile));
+            paintedTiles.clear();
+            if (gridHelper) scene.remove(gridHelper);
+            if (stageOutline) scene.remove(stageOutline);
+
+            const config = STAGES[idx];
+            gridW = config.w; gridH = config.h;
+            paintColor = config.color;
+            totalTilesCount = gridW * gridH;
+
+            document.getElementById('stage-num').textContent = idx + 1;
+            document.getElementById('total-tiles').textContent = totalTilesCount;
+            document.getElementById('msg-overlay').style.display = 'none';
+            isGameOver = false;
+
+            // グリッドを背景として配置
+            gridHelper = new THREE.GridHelper(30, 30, 0x222222, 0x111111);
+            gridHelper.position.y = -0.01;
+            scene.add(gridHelper);
+
+            // ステージの外枠を作成
+            const outlineGeom = new THREE.BoxGeometry(gridW, 0.1, gridH);
+            const edges = new THREE.EdgesGeometry(outlineGeom);
+            stageOutline = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: paintColor, linewidth: 2 }));
+            stageOutline.position.set(0, 0, 0);
+            scene.add(stageOutline);
+
+            const camDist = Math.max(gridW, gridH) * 1.5;
+            camera.position.set(camDist, camDist, camDist);
+            camera.lookAt(0, 0, 0);
+
+            spawnCube(true);
+        }
+
+        function spawnCube(isFirst = false) {
+            let x = 0, z = 0;
+            if (!isFirst && paintedTiles.size > 0) {
+                const keys = Array.from(paintedTiles.keys());
+                const k = keys[Math.floor(Math.random() * keys.length)];
+                [x, z] = k.split(',').map(Number);
+            } else if (isFirst) {
+                // 中心がズレないよう調整（偶数サイズの場合を考慮）
+                x = (gridW % 2 === 0) ? 0.5 : 0;
+                z = (gridH % 2 === 0) ? 0.5 : 0;
+            }
+
+            const geometry = new THREE.BoxGeometry(1, 1, 1);
+            const materials = Array(6).fill(0).map(() => new THREE.MeshPhongMaterial({ color: paintColor }));
+            cube = new THREE.Mesh(geometry, materials);
+            cube.position.set(x, 10, z);
+            scene.add(cube);
+
+            facePaintStatus = Array(6).fill(true);
+            paintRemaining = 6;
+            updateUI();
+
+            let v = 0;
+            const fall = () => {
+                if (cube.position.y > 0.5) {
+                    v += 0.04; cube.position.y -= v;
+                    requestAnimationFrame(fall);
+                } else {
+                    cube.position.y = 0.5;
+                    checkTileAndPaint();
+                }
+                renderer.render(scene, camera);
+            };
+            fall();
+        }
+
+        function checkTileAndPaint() {
+            const x = Math.round(cube.position.x * 2) / 2; // 0.5刻みに対応
+            const z = Math.round(cube.position.z * 2) / 2;
+            const key = `${x},${z}`;
+            const downIdx = getDownFaceIndex();
+
+            if (!paintedTiles.has(key)) {
+                const tile = new THREE.Mesh(new THREE.PlaneGeometry(0.98, 0.98), new THREE.MeshLambertMaterial({ color: paintColor }));
+                tile.rotation.x = -Math.PI / 2; tile.position.set(x, 0.01, z);
+                scene.add(tile);
+                paintedTiles.set(key, tile);
+
+                cube.material[downIdx].color.setHex(0x444444);
+                facePaintStatus[downIdx] = false;
+                paintRemaining--;
+                updateUI();
+            }
+            if (paintedTiles.size === totalTilesCount) showClear();
+            else if (paintRemaining <= 0) vanishCube();
+        }
+
+        function getDownFaceIndex() {
+            const worldDown = new THREE.Vector3(0, -1, 0);
+            let idx = -1, minA = Math.PI;
+            const normals = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(-1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, -1, 0), new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, -1)];
+            normals.forEach((n, i) => {
+                const wn = n.clone().applyQuaternion(cube.quaternion);
+                const a = wn.angleTo(worldDown);
+                if (a < minA) { minA = a; idx = i; }
+            });
+            return idx;
+        }
+
+        window.addEventListener('keydown', (e) => {
+            if (isAnimating || isGameOver || !cube || cube.position.y > 0.5) return;
+            let mx = 0, mz = 0;
+            const k = e.key;
+
+            // WASD と カーソルキーの両方に対応
+            if (k === 'w' || k === 'ArrowUp') mz = -1;
+            else if (k === 's' || k === 'ArrowDown') mz = 1;
+            else if (k === 'a' || k === 'ArrowLeft') mx = -1;
+            else if (k === 'd' || k === 'ArrowRight') mx = 1;
+            else return;
+
+            const nx = cube.position.x + mx, nz = cube.position.z + mz;
+
+            // ステージ境界判定 (外枠の内側に収まっているか)
+            const limitX = gridW / 2;
+            const limitZ = gridH / 2;
+            if (Math.abs(nx) >= limitX || Math.abs(nz) >= limitZ) {
+                animateShake(mx, mz); return;
+            }
+
+            if (!paintedTiles.has(`${nx},${nz}`)) {
+                const nextDown = predictDown(mx, mz);
+                if (!facePaintStatus[nextDown]) {
+                    animateShake(mx, mz); return;
+                }
+            }
+            animateRoll(mx, mz);
+        });
+
+        function predictDown(mx, mz) {
+            const axis = new THREE.Vector3(mz, 0, -mx);
+            const q = cube.quaternion.clone().premultiply(new THREE.Quaternion().setFromAxisAngle(axis, Math.PI / 2));
+            const wd = new THREE.Vector3(0, -1, 0);
+            let idx = -1, minA = Math.PI;
+            const normals = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(-1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, -1, 0), new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, -1)];
+            normals.forEach((n, i) => {
+                const wn = n.clone().applyQuaternion(q);
+                if (wn.angleTo(wd) < minA) { minA = wn.angleTo(wd); idx = i; }
+            });
+            return idx;
+        }
+
+        function animateRoll(mx, mz) {
+            isAnimating = true;
+            const axis = new THREE.Vector3(mz, 0, -mx);
+            let frame = 0;
+            pivot.position.set(cube.position.x + mx * 0.5, 0, cube.position.z + mz * 0.5);
+            cube.position.sub(pivot.position); pivot.add(cube);
+            const anim = () => {
+                frame++; pivot.rotateOnWorldAxis(axis, (Math.PI / 2) / 10);
+                if (frame < 10) requestAnimationFrame(anim);
+                else { finalize(); checkTileAndPaint(); }
+                renderer.render(scene, camera);
+            };
+            anim();
+        }
+
+        function animateShake(mx, mz) {
+            isAnimating = true;
+            const axis = new THREE.Vector3(mz, 0, -mx);
+            let frame = 0;
+            pivot.position.set(cube.position.x + mx * 0.5, 0, cube.position.z + mz * 0.5);
+            cube.position.sub(pivot.position); pivot.add(cube);
+            const anim = () => {
+                frame++; const a = Math.sin((frame / 10) * Math.PI) * (Math.PI / 18);
+                pivot.rotation.set(0, 0, 0); pivot.rotateOnWorldAxis(axis, a);
+                if (frame < 10) requestAnimationFrame(anim);
+                else finalize();
+                renderer.render(scene, camera);
+            };
+            anim();
+        }
+
+        function finalize() {
+            cube.applyMatrix4(pivot.matrixWorld); pivot.remove(cube); scene.add(cube);
+            pivot.rotation.set(0, 0, 0);
+            // 座標スナップを0.5単位に調整
+            const sx = (gridW % 2 === 0) ? Math.floor(cube.position.x) + 0.5 : Math.round(cube.position.x);
+            const sz = (gridH % 2 === 0) ? Math.floor(cube.position.z) + 0.5 : Math.round(cube.position.z);
+            cube.position.set(sx, 0.5, sz);
+            cube.rotation.set(Math.round(cube.rotation.x / (Math.PI / 2)) * (Math.PI / 2), Math.round(cube.rotation.y / (Math.PI / 2)) * (Math.PI / 2), Math.round(cube.rotation.z / (Math.PI / 2)) * (Math.PI / 2));
+            isAnimating = false;
+        }
+
+        function vanishCube() {
+            isAnimating = true;
+            let s = 1.0;
+            const anim = () => {
+                if (s > 0) { s -= 0.1; cube.scale.set(s, s, s); cube.rotation.y += 0.4; requestAnimationFrame(anim); }
+                else { scene.remove(cube); cube = null; isAnimating = false; spawnCube(); }
+                renderer.render(scene, camera);
+            };
+            anim();
+        }
+
+        function updateUI() {
+            document.getElementById('paint-status').textContent = paintRemaining;
+            document.getElementById('progress').textContent = paintedTiles.size;
+        }
+
+        function showClear() {
+            isGameOver = true;
+            document.getElementById('msg-overlay').style.display = 'block';
+            if (currentIdx === STAGES.length - 1) {
+                document.getElementById('msg-title').textContent = "CONGRATULATIONS!";
+                document.getElementById('next-btn').style.display = 'none';
+            }
+        }
+
+        document.getElementById('next-btn').addEventListener('click', () => {
+            currentIdx++; initStage(currentIdx);
+        });
+
+        initStage(0);
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+
+</html>
