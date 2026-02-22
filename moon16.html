@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Space Survival - Map & Collision Update</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #0a0a0a;
+            position: fixed;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            touch-action: none;
+        }
+
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+
+<body>
+    <script>
+        let player, bases = [], crystals = [], enemies = [], wanderers = [], bullets = [], drops = [], turrets = [], particles = [], bosses = [], stakes = [], generators = [];
+        let baseStock = { c: 0, fe: 0 };
+        let deathDrop = null, laserLevel = 1;
+        let upgradeLevels, lastBaseTouched, lastMoveDir, nextBaseCandidates = [];
+        let worldSize = 4000, goal = { x: 3800, y: 3800 };
+        let gameState = "START", requiredFeForBase = 16, buildProgress = 0;
+        let isRespawning = false, respawnTimer = 0;
+
+        const ROPE_SEGMENTS = 90, SEGMENT_LEN = 11, MAX_ROPE_DIST = ROPE_SEGMENTS * SEGMENT_LEN;
+        let ropePoints = [], inputStartPos = null, isInputActive = false;
+
+        const COL_C = [255, 190, 50], COL_FE = [180, 180, 200];
+
+        function setup() {
+            createCanvas(windowWidth, windowHeight);
+            initGame();
+        }
+
+        function windowResized() { resizeCanvas(windowWidth, windowHeight); }
+
+        function initGame() {
+            player = { x: 2000, y: 2000, ox: 50, c: 0, fe: 0 };
+            baseStock = { c: 0, fe: 0 }; deathDrop = null; laserLevel = 1;
+            upgradeLevels = { laser: 1, speed: 2.3 };
+
+            stakes = [];
+            for (let i = 0; i < 120; i++) spawnStake();
+
+            let bx = 1950, by = 1950;
+            // 拠点が岩と重ならないように配置
+            while (isNearObject(bx, by, 80)) { bx += 50; by += 50; }
+            bases = [{ x: bx, y: by }];
+            lastBaseTouched = bases[0];
+            player.x = bx + 50; player.y = by + 50;
+            lastMoveDir = { x: 14, y: 0 };
+
+            crystals = []; enemies = []; wanderers = []; bullets = []; drops = []; turrets = []; particles = []; bosses = []; generators = [];
+            requiredFeForBase = 16; buildProgress = 0;
+
+            for (let i = 0; i < 16; i++) spawnGenerator();
+            for (let i = 0; i < 25; i++) {
+                let coreX = random(worldSize), coreY = random(worldSize);
+                for (let j = 0; j < 35; j++) {
+                    let x = coreX + random(-130, 130), y = coreY + random(-130, 130);
+                    if (getTerrain(x, y) < 0.6 && !isNearObject(x, y, 30)) crystals.push({ x, y });
+                }
+            }
+            for (let i = 0; i < 12; i++) spawnBoss();
+            for (let i = 0; i < 24; i++) spawnTurret();
+            for (let i = 0; i < 50; i++) spawnWanderer();
+
+            initRopeCoil();
+        }
+
+        // あらゆる重要オブジェクトとの距離をチェックする共通関数
+        function isNearObject(x, y, distThresh) {
+            for (let s of stakes) if (dist(x, y, s.x, s.y) < distThresh) return true;
+            for (let b of bases) if (dist(x, y, b.x, b.y) < distThresh + 20) return true;
+            for (let g of generators) if (dist(x, y, g.x, g.y) < distThresh) return true;
+            for (let t of turrets) if (dist(x, y, t.x, t.y) < distThresh) return true;
+            for (let bo of bosses) if (dist(x, y, bo.x, bo.y) < distThresh + 20) return true;
+            return false;
+        }
+
+        function initRopeCoil() {
+            ropePoints = [];
+            for (let i = 0; i <= ROPE_SEGMENTS; i++) {
+                ropePoints.push({ x: player.x, y: player.y, oldX: player.x, oldY: player.y });
+            }
+        }
+
+        function draw() {
+            if (gameState === "START") { drawScreen("SPACE SURVIVAL", "TAP TO START"); return; }
+            runGameLoop();
+        }
+
+        function drawScreen(title, sub) {
+            background(0); textAlign(CENTER); fill(255);
+            textSize(32); text(title, width / 2, height / 2 - 20);
+            textSize(16); text(sub, width / 2, height / 2 + 30);
+        }
+
+        function runGameLoop() {
+            background(15);
+            updateLogic();
+            push();
+            translate(width / 2 - player.x, height / 2 - player.y);
+            drawTerrain();
+            drawRope();
+
+            nextBaseCandidates.forEach(c => {
+                stroke(255, 255, 0, 150); noFill(); strokeWeight(2);
+                ellipse(c.x, c.y, 60 + sin(frameCount * 0.1) * 10);
+            });
+
+            drawObjects();
+
+            push(); translate(player.x, player.y); rotate(atan2(lastMoveDir.y, lastMoveDir.x));
+            if (isRespawning && frameCount % 4 < 2) fill(255, 0, 0);
+            else { fill(0); stroke(0, 255, 0); strokeWeight(2); }
+            beginShape(); vertex(12, 0); vertex(-6, 8); vertex(-10, 5); vertex(-10, -5); vertex(-6, -8); endShape(CLOSE);
+            pop();
+
+            pop();
+            drawUI();
+            drawMiniMap();
+            if (isInputActive && inputStartPos) drawInputUI();
+        }
+
+        function updateLogic() {
+            if (isRespawning) {
+                respawnTimer++;
+                let speed = 0.15 + (respawnTimer * 0.005);
+                for (let i = 0; i < ropePoints.length - 1; i++) {
+                    ropePoints[i + 1].x = lerp(ropePoints[i + 1].x, ropePoints[i].x, speed);
+                    ropePoints[i + 1].y = lerp(ropePoints[i + 1].y, ropePoints[i].y, speed);
+                }
+                player.x = ropePoints[ROPE_SEGMENTS].x; player.y = ropePoints[ROPE_SEGMENTS].y;
+                if (respawnTimer > 70 || dist(player.x, player.y, lastBaseTouched.x, lastBaseTouched.y) < 10) {
+                    isRespawning = false; player.x = lastBaseTouched.x; player.y = lastBaseTouched.y; player.ox = 50; initRopeCoil();
+                }
+                return;
+            }
+
+            let nextX = player.x, nextY = player.y;
+            if (isInputActive && inputStartPos) {
+                let dx = mouseX - inputStartPos.x, dy = mouseY - inputStartPos.y, d = sqrt(dx * dx + dy * dy);
+                if (d > 5) {
+                    let speed = map(d, 0, 100, 0, upgradeLevels.speed, true);
+                    let angle = atan2(dy, dx);
+                    nextX += cos(angle) * speed; nextY += sin(angle) * speed;
+                    lastMoveDir = { x: cos(angle) * 14, y: sin(angle) * 14 };
+                }
+                if (frameCount % 12 === 0) fireLaser();
+            }
+
+            let dToBase = dist(nextX, nextY, lastBaseTouched.x, lastBaseTouched.y);
+            if (dToBase > MAX_ROPE_DIST - 15) {
+                let a = atan2(nextY - lastBaseTouched.y, nextX - lastBaseTouched.x);
+                nextX = lastBaseTouched.x + cos(a) * (MAX_ROPE_DIST - 15);
+                nextY = lastBaseTouched.y + sin(a) * (MAX_ROPE_DIST - 15);
+            }
+            if (getTerrain(nextX, nextY) < 0.6) { player.x = nextX; player.y = nextY; }
+            player.ox -= 0.012;
+
+            updateRopePhysics();
+
+            bases.forEach(b => {
+                if (dist(player.x, player.y, b.x, b.y) < 70) {
+                    if (lastBaseTouched !== b) { lastBaseTouched = b; initRopeCoil(); }
+                    player.ox = 50;
+                    baseStock.c += player.c; player.c = 0; baseStock.fe += player.fe; player.fe = 0;
+                    let cost = laserLevel * 12;
+                    if (baseStock.c >= cost && laserLevel < 8) { baseStock.c -= cost; laserLevel++; }
+                }
+            });
+
+            if (deathDrop && dist(player.x, player.y, deathDrop.x, deathDrop.y) < 35) {
+                player.c += deathDrop.c; player.fe += deathDrop.fe;
+                deathDrop = null;
+            }
+
+            nextBaseCandidates.forEach(c => {
+                if (dist(player.x, player.y, c.x, c.y) < 55) {
+                    buildProgress += 1.5;
+                    if (buildProgress > 100) {
+                        bases.push({ x: c.x, y: c.y });
+                        baseStock.fe -= requiredFeForBase; requiredFeForBase += 4; buildProgress = 0; nextBaseCandidates = [];
+                    }
+                }
+            });
+
+            processProjectiles();
+            processEnemies();
+            processGenerators();
+            processCrystals();
+            if (baseStock.fe >= requiredFeForBase && nextBaseCandidates.length === 0) spawnCandidates();
+        }
+
+        function updateRopePhysics() {
+            if (isRespawning) return;
+            ropePoints[0].x = lastBaseTouched.x; ropePoints[0].y = lastBaseTouched.y;
+            ropePoints[ROPE_SEGMENTS].x = player.x; ropePoints[ROPE_SEGMENTS].y = player.y;
+
+            for (let i = 1; i < ROPE_SEGMENTS; i++) {
+                let p = ropePoints[i];
+                let vx = (p.x - p.oldX) * 0.96; let vy = (p.y - p.oldY) * 0.96;
+                p.oldX = p.x; p.oldY = p.y; p.x += vx; p.y += vy;
+
+                if (getTerrain(p.x, p.y) >= 0.6) { p.x = p.oldX; p.y = p.oldY; }
+                for (let s of stakes) {
+                    let d = dist(p.x, p.y, s.x, s.y);
+                    if (d < 18) {
+                        let ang = atan2(p.y - s.y, p.x - s.x);
+                        p.x = s.x + cos(ang) * 18; p.y = s.y + sin(ang) * 18;
+                    }
+                }
+            }
+            for (let n = 0; n < 8; n++) {
+                for (let i = 0; i < ROPE_SEGMENTS; i++) {
+                    let p1 = ropePoints[i], p2 = ropePoints[i + 1];
+                    let dx = p2.x - p1.x, dy = p2.y - p1.y, d = sqrt(dx * dx + dy * dy);
+                    if (d > SEGMENT_LEN) {
+                        let diff = (d - SEGMENT_LEN) / d;
+                        let m1 = (i === 0) ? 0 : 0.5; let m2 = (i + 1 === ROPE_SEGMENTS) ? 0 : 0.5;
+                        p1.x += dx * diff * m1; p1.y += dy * diff * m1; p2.x -= dx * diff * m2; p2.y -= dy * diff * m2;
+                    }
+                }
+            }
+        }
+
+        function fireLaser() {
+            let myBullets = bullets.filter(b => !b.isEnemy).length;
+            if (myBullets < (laserLevel <= 4 ? laserLevel : 4)) {
+                let ang = atan2(lastMoveDir.y, lastMoveDir.x);
+                bullets.push({
+                    x: player.x, y: player.y, vx: cos(ang) * 12, vy: sin(ang) * 12,
+                    isEnemy: false, life: 60, lvl: laserLevel, hitIds: [],
+                    reflects: (laserLevel >= 7 ? 3 : 0)
+                });
+            }
+        }
+
+        function processProjectiles() {
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                let b = bullets[i];
+                b.x += b.vx; b.y += b.vy; b.life--;
+
+                if (b.isEnemy) {
+                    for (let bs of bases) if (dist(b.x, b.y, bs.x, bs.y) < 70) { b.life = 0; break; }
+                }
+
+                let hitSomething = false;
+                for (let s of stakes) {
+                    if (dist(b.x, b.y, s.x, s.y) < 16) {
+                        s.hp -= (b.lvl >= 5 ? 2 : 1);
+                        spawnSpark(b.x, b.y);
+                        if (b.reflects > 0) {
+                            let n = createVector(b.x - s.x, b.y - s.y).normalize();
+                            let v = createVector(b.vx, b.vy);
+                            let dot = v.dot(n);
+                            v.sub(n.mult(2 * dot));
+                            b.vx = v.x; b.vy = v.y; b.reflects--;
+                        } else { hitSomething = true; }
+                        if (s.hp <= 0) { for (let j = 0; j < 2; j++) drops.push({ x: s.x, y: s.y, type: 'Fe' }); stakes = stakes.filter(x => x !== s); }
+                        break;
+                    }
+                }
+
+                if (!hitSomething && getTerrain(b.x, b.y) >= 0.6) {
+                    spawnSpark(b.x, b.y, [255, 255, 255]);
+                    if (b.reflects > 0) {
+                        if (getTerrain(b.x - b.vx, b.y) < 0.6) b.vx *= -1;
+                        else if (getTerrain(b.x, b.y - b.vy) < 0.6) b.vy *= -1;
+                        else { b.vx *= -1; b.vy *= -1; }
+                        b.reflects--;
+                    } else { hitSomething = true; }
+                }
+
+                if (!b.isEnemy) {
+                    let targets = [...enemies, ...wanderers, ...turrets, ...bosses, ...generators];
+                    for (let t of targets) {
+                        let hitDist = t.isBoss ? 45 : (t.isGenerator ? 30 : 18);
+                        if (dist(b.x, b.y, t.x, t.y) < hitDist && !b.hitIds.includes(t)) {
+                            t.hp -= (b.lvl >= 5 ? 2 : 1);
+                            spawnSpark(b.x, b.y, [255, 50, 50]);
+                            if (b.lvl < 5) b.life = 0; else b.hitIds.push(t);
+                            if (t.hp <= 0) {
+                                if (t.isGenerator) { for (let j = 0; j < 12; j++) drops.push({ x: t.x + random(-20, 20), y: t.y + random(-20, 20), type: 'Fe' }); generators = generators.filter(x => x !== t); }
+                                else if (t.isBoss) { for (let j = 0; j < 16; j++) drops.push({ x: t.x + random(-30, 30), y: t.y + random(-30, 30), type: 'Fe' }); bosses = bosses.filter(x => x !== t); }
+                                else if (t.isTurret) { for (let j = 0; j < 8; j++) drops.push({ x: t.x, y: t.y, type: 'Fe' }); turrets = turrets.filter(x => x !== t); }
+                                else if (t.isWanderer) { for (let j = 0; j < 2; j++) drops.push({ x: t.x, y: t.y, type: 'Fe' }); wanderers = wanderers.filter(x => x !== t); }
+                                else { drops.push({ x: t.x, y: t.y, type: 'Fe' }); enemies = enemies.filter(x => x !== t); }
+                            }
+                            break;
+                        }
+                    }
+                } else if (dist(b.x, b.y, player.x, player.y) < 12) { triggerRespawn(); b.life = 0; }
+
+                if (hitSomething || b.life <= 0) bullets.splice(i, 1);
+            }
+            for (let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i]; p.x += p.vx; p.y += p.vy; p.life--;
+                if (p.life <= 0) particles.splice(i, 1);
+            }
+        }
+
+        function processGenerators() {
+            generators.forEach(g => {
+                if (dist(player.x, player.y, g.x, g.y) < 800) {
+                    let count = enemies.filter(e => e.genId === g.id).length;
+                    if (count < 4 && frameCount % 180 === 0) {
+                        // スポーン時も重なりをチェック
+                        let sx = g.x + random(-20, 20), sy = g.y + random(-20, 20);
+                        enemies.push({ x: sx, y: sy, hp: 1, genId: g.id });
+                    }
+                }
+            });
+        }
+
+        function processEnemies() {
+            let targets = [...bosses, ...enemies, ...wanderers];
+            targets.forEach((e, idx) => {
+                // 拠点との衝突
+                for (let bs of bases) {
+                    let dBase = dist(e.x, e.y, bs.x, bs.y);
+                    if (dBase < 80) {
+                        let ang = atan2(e.y - bs.y, e.x - bs.x);
+                        e.x = bs.x + cos(ang) * 80; e.y = bs.y + sin(ang) * 80;
+                    }
+                }
+
+                // 敵同士の重なり防止（押し出し）
+                targets.forEach((other, oIdx) => {
+                    if (idx !== oIdx) {
+                        let d = dist(e.x, e.y, other.x, other.y);
+                        let minDist = (e.isBoss ? 60 : 15) + (other.isBoss ? 60 : 15);
+                        if (d < minDist) {
+                            let ang = atan2(e.y - other.y, e.x - other.x);
+                            e.x += cos(ang) * 1; e.y += sin(ang) * 1;
+                        }
+                    }
+                });
+
+                if (e.isBoss) {
+                    e.rot += 0.24;
+                    let dPlayer = dist(player.x, player.y, e.x, e.y);
+                    if (dPlayer < 500 && dPlayer > 250) {
+                        e.x += (player.x - e.x) * 0.0017; e.y += (player.y - e.y) * 0.0017;
+                    }
+                    if (dPlayer < 600 && frameCount % 35 === 0) {
+                        for (let i = 0; i < 8; i++) {
+                            let a = e.rot + (TWO_PI / 8) * i;
+                            // ボスの弾速を1/2 (3 -> 1.5)
+                            bullets.push({ x: e.x, y: e.y, vx: cos(a) * 1.5, vy: sin(a) * 1.5, isEnemy: true, life: 360, lvl: 1, hitIds: [] });
+                        }
+                    }
+                } else if (e.isWanderer) {
+                    e.a += 0.03; e.x += cos(e.a) * 2; e.y += sin(e.a) * 2;
+                    if (dist(player.x, player.y, e.x, e.y) < 20) triggerRespawn();
+                } else {
+                    let dPlayer = dist(player.x, player.y, e.x, e.y);
+                    if (dPlayer < 600) {
+                        let a = atan2(player.y - e.y, player.x - e.x);
+                        // ザコ敵の移動速度を1/2 (1.1 -> 0.55)
+                        e.x += cos(a) * 0.55; e.y += sin(a) * 0.55;
+                    }
+                    if (dPlayer < 15) triggerRespawn();
+                }
+            });
+
+            turrets.forEach(t => {
+                t.angle = atan2(player.y - t.y, player.x - t.x);
+                if (dist(player.x, player.y, t.x, t.y) < 400 && frameCount % 100 === 0) {
+                    // 砲台の弾速を1/2 (3 -> 1.5)
+                    bullets.push({ x: t.x, y: t.y, vx: cos(t.angle) * 1.5, vy: sin(t.angle) * 1.5, isEnemy: true, life: 300, lvl: 1, hitIds: [] });
+                }
+            });
+        }
+
+        function spawnSpark(x, y, col) {
+            for (let k = 0; k < 5; k++) particles.push({ x: x, y: y, vx: random(-4, 4), vy: random(-4, 4), life: 15, col: col || [255, 200, 50] });
+        }
+
+        function processCrystals() {
+            for (let i = crystals.length - 1; i >= 0; i--) { if (dist(player.x, player.y, crystals[i].x, crystals[i].y) < 25) { player.c++; crystals.splice(i, 1); } }
+            for (let i = drops.length - 1; i >= 0; i--) { if (dist(player.x, player.y, drops[i].x, drops[i].y) < 25) { if (drops[i].type === 'C') player.c++; else player.fe++; drops.splice(i, 1); } }
+        }
+
+        function drawRope() {
+            let d = dist(player.x, player.y, lastBaseTouched.x, lastBaseTouched.y);
+            let tension = map(d, MAX_ROPE_DIST * 0.7, MAX_ROPE_DIST, 0, 1, true);
+            for (let i = 0; i < ropePoints.length; i++) {
+                let p = ropePoints[i];
+                if (i % 6 === 0) { fill(255, 150); noStroke(); ellipse(p.x, p.y, 3); }
+            }
+            noFill(); stroke(lerpColor(color(100, 200, 255, 100), color(255, 50, 50, 150), tension));
+            strokeWeight(2); beginShape(); for (let p of ropePoints) curveVertex(p.x, p.y); endShape();
+        }
+
+        function drawObjects() {
+            fill(0, 255, 200); stroke(255); rect(goal.x - 15, goal.y - 40, 30, 40);
+            bases.forEach(b => { stroke(100, 150, 255); noFill(); strokeWeight(2.5); rect(b.x - 40, b.y - 40, 80, 80); stroke(100, 150, 255, 50); ellipse(b.x, b.y, 150); });
+            textSize(14); textAlign(CENTER); noStroke();
+            crystals.forEach(c => { fill(COL_C); text("C", c.x, c.y); });
+            drops.forEach(d => { fill(d.type === 'C' ? COL_C : COL_FE); text(d.type, d.x, d.y); });
+            enemies.forEach(e => { fill(255, 0, 0); ellipse(e.x, e.y, 10); });
+            wanderers.forEach(w => { fill(200, 0, 50); ellipse(w.x, w.y, 22); });
+            turrets.forEach(t => { push(); translate(t.x, t.y); rotate(t.angle); fill(100); rect(-15, -15, 30, 30); fill(255, 50, 0); rect(0, -5, 20, 10); pop(); });
+            bosses.forEach(b => { push(); translate(b.x, b.y); rotate(b.rot); fill(200, 0, 0); stroke(255, 100); strokeWeight(2); rect(-30, -30, 60, 60); pop(); });
+            stakes.forEach(s => { fill(60); stroke(100); rect(s.x - 12, s.y - 12, 24, 24); });
+            generators.forEach(g => {
+                let isActive = dist(player.x, player.y, g.x, g.y) < 800;
+                fill(isActive ? [150, 0, 255] : [70, 0, 100]);
+                stroke(255, 100); rect(g.x - 20, g.y - 20, 40, 40);
+                fill(isActive ? 255 : 0); ellipse(g.x, g.y, 10);
+            });
+            bullets.forEach(b => {
+                if (b.isEnemy) { stroke(255, 120, 0); strokeWeight(3); }
+                else { stroke(255, 255, 0); strokeWeight(2); }
+                line(b.x, b.y, b.x - b.vx * 0.8, b.y - b.vy * 0.8);
+            });
+            particles.forEach(p => { stroke(p.col); strokeWeight(2); point(p.x, p.y); });
+            if (deathDrop) {
+                stroke(255, 0, 0); strokeWeight(4);
+                line(deathDrop.x - 15, deathDrop.y - 15, deathDrop.x + 15, deathDrop.y + 15);
+                line(deathDrop.x + 15, deathDrop.y - 15, deathDrop.x - 15, deathDrop.y + 15);
+            }
+        }
+
+        function drawMiniMap() {
+            let ms = 110, mx = width - ms - 20, my = 20;
+            fill(0, 180); stroke(255, 50); rect(mx, my, ms, ms);
+            let sc = ms / worldSize;
+            push(); translate(mx, my);
+            noStroke();
+            fill(120); stakes.forEach(s => ellipse(s.x * sc, s.y * sc, 1.5));
+            fill(150, 0, 255); generators.forEach(g => rect(g.x * sc - 1.5, g.y * sc - 1.5, 3, 3));
+            fill(255, 150, 0); turrets.forEach(t => rect(t.x * sc - 1, t.y * sc - 1, 2, 2));
+            fill(255, 0, 0); bosses.forEach(b => rect(b.x * sc - 2, b.y * sc - 2, 4, 4));
+
+            stroke(255, 255, 0); noFill();
+            nextBaseCandidates.forEach(c => ellipse(c.x * sc, c.y * sc, 3));
+
+            noStroke();
+            fill(0, 255, 0); ellipse(player.x * sc, player.y * sc, 4);
+            fill(0, 255, 200); rect(goal.x * sc - 2, goal.y * sc - 2, 4, 4);
+            stroke(100, 150, 255); noFill(); bases.forEach(b => rect(b.x * sc - 2, b.y * sc - 2, 4, 4));
+            pop();
+        }
+
+        function triggerRespawn() {
+            if (isRespawning) return;
+            deathDrop = { x: player.x, y: player.y, c: player.c, fe: player.fe };
+            isRespawning = true; respawnTimer = 0; player.c = 0; player.fe = 0; isInputActive = false;
+        }
+
+        function getTerrain(x, y) { return noise(floor(x / 50) * 0.03, floor(y / 50) * 0.03); }
+        function drawTerrain() {
+            noStroke(); fill(40);
+            let sX = floor((player.x - width / 2) / 50) * 50, sY = floor((player.y - height / 2) / 50) * 50;
+            for (let x = sX; x < sX + width + 100; x += 50) {
+                for (let y = sY; y < sY + height + 100; y += 50) {
+                    if (getTerrain(x, y) >= 0.6) rect(x, y, 51, 51);
+                }
+            }
+        }
+
+        function drawInputUI() { noFill(); stroke(255, 50); ellipse(inputStartPos.x, inputStartPos.y, 60); line(inputStartPos.x, inputStartPos.y, mouseX, mouseY); }
+
+        function mousePressed() {
+            if (gameState === "START") { gameState = "PLAY"; return false; }
+            isInputActive = true; inputStartPos = { x: mouseX, y: mouseY };
+            return false;
+        }
+        function mouseReleased() { isInputActive = false; return false; }
+        function touchStarted() { return mousePressed(); }
+        function touchEnded() { return mouseReleased(); }
+
+        function spawnStake() {
+            let x = random(worldSize), y = random(worldSize);
+            if (getTerrain(x, y) < 0.6) stakes.push({ x, y, hp: 5 });
+            else if (random() < 0.3) spawnStake();
+        }
+        function spawnGenerator() {
+            let x, y;
+            do { x = random(worldSize); y = random(worldSize); }
+            while (getTerrain(x, y) >= 0.6 || dist(x, y, 2000, 2000) < 400 || isNearObject(x, y, 80));
+            generators.push({ x, y, hp: 32, id: random(), isGenerator: true });
+        }
+        function spawnTurret() { let x, y; do { x = random(worldSize); y = random(worldSize); } while (getTerrain(x, y) >= 0.6 || isNearObject(x, y, 60)); turrets.push({ x, y, hp: 8, angle: 0, isTurret: true }); }
+        function spawnWanderer() { let x, y; do { x = random(worldSize); y = random(worldSize); } while (getTerrain(x, y) >= 0.6 || isNearObject(x, y, 50)); wanderers.push({ x, y, a: random(TWO_PI), hp: 4, isWanderer: true }); }
+        function spawnBoss() { let x, y; do { x = random(worldSize); y = random(worldSize); } while (getTerrain(x, y) >= 0.6 || dist(x, y, 2000, 2000) < 800 || isNearObject(x, y, 100)); bosses.push({ x, y, hp: 30, isBoss: true, rot: 0 }); }
+
+        function drawUI() {
+            textAlign(LEFT); drawGauge(20, 35, "OX", player.ox, 50);
+            fill(255); noStroke(); textSize(14);
+            text(`[BAG] `, 20, 70); fill(COL_C); text(`C:${player.c}`, 70, 70); fill(COL_FE); text(`Fe:${player.fe}`, 120, 70);
+            fill(100, 200, 255); text(`[STOCK] `, 20, 95); fill(COL_C); text(`C:${baseStock.c}`, 85, 95); fill(COL_FE); text(`Fe:${baseStock.fe}/${requiredFeForBase}`, 140, 95);
+            fill(255, 255, 0); text(`[LASER LV] ${laserLevel} / 8`, 20, 120);
+            if (buildProgress > 0) { fill(255, 255, 0); rect(20, 135, buildProgress, 5); }
+        }
+        function drawGauge(x, y, label, val, maxVal) {
+            fill(50); rect(x + 30, y - 12, 100, 15);
+            fill(val > 15 ? [0, 255, 0] : [255, 0, 0]); rect(x + 30, y - 12, (val / maxVal) * 100, 15);
+            fill(255); text(label, x, y);
+        }
+        function spawnCandidates() {
+            nextBaseCandidates = [];
+            for (let i = 0; i < 3; i++) {
+                let a = random(TWO_PI), r = MAX_ROPE_DIST * 0.85;
+                let tx = lastBaseTouched.x + cos(a) * r, ty = lastBaseTouched.y + sin(a) * r;
+                if (getTerrain(tx, ty) < 0.6 && !isNearObject(tx, ty, 80)) nextBaseCandidates.push({ x: tx, y: ty });
+            }
+        }
+    </script>
+</body>
+
+</html>
