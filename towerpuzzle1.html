@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Simple Block Puzzle</title>
+    <style>
+        :root {
+            --field-bg: #110c00;
+            --panel-bg: rgba(34, 34, 34, 0.9);
+        }
+
+        body {
+            background: #0a0a0a;
+            color: #eee;
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', sans-serif;
+            overflow: hidden;
+            user-select: none;
+            touch-action: none;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            width: 100vw;
+        }
+
+        #gameContainer {
+            position: relative;
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            height: 100%;
+        }
+
+        canvas#gameCanvas {
+            background: var(--field-bg);
+            box-shadow: 0 0 50px rgba(0, 0, 0, 1);
+            cursor: pointer;
+            display: block;
+        }
+
+        .side-panel {
+            background: var(--panel-bg);
+            padding: 15px;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            box-sizing: border-box;
+            backdrop-filter: blur(5px);
+            z-index: 10;
+            margin-left: 20px;
+            min-width: 140px;
+        }
+
+        .stat-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: #aaa;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            font-family: monospace;
+            color: #fff;
+        }
+
+        #nextCanvas {
+            background: #000;
+            border-radius: 5px;
+        }
+
+        @media (max-aspect-ratio: 1/1) {
+            #gameContainer {
+                flex-direction: column;
+            }
+
+            .side-panel {
+                margin-left: 0;
+                margin-top: 10px;
+                width: 90%;
+                flex-direction: row;
+                flex-wrap: wrap;
+                justify-content: space-around;
+                padding: 10px;
+            }
+
+            .stat-value {
+                font-size: 18px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div id="gameContainer">
+        <canvas id="gameCanvas"></canvas>
+        <div class="side-panel">
+            <div class="stat-group">
+                <div class="stat-label">DEPTH</div>
+                <div id="depth" class="stat-value">0m</div>
+            </div>
+            <div class="stat-group" style="align-items: center;">
+                <div class="stat-label" style="margin-bottom: 5px;">NEXT</div>
+                <canvas id="nextCanvas" width="80" height="80"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const CONFIG = {
+            ROWS_DATA: 128, COLS: 9, SIZE: 30, ROWS_VIEW: 15,
+            SPEED_BASE_UNIT: 0.0075,
+            SPEED_DOWN: 0.1,
+            CAMERA_SMOOTH: 0.08,
+            NEXT_TURN_WAIT: 200,
+            BLOCK_TYPES: { EMPTY: 0, HARD: 2 }, // SOFT(1)とIRON(3)を削除
+            COLORS: { HARD_FILL: '#543', HARD_STROKE: '#210' }
+        };
+
+        let field, currentPiece, nextPiece, gameState, isSettling, isCameraMoving = false;
+        let viewOffsetY = 0, targetViewOffsetY = 0;
+        let flashingLines = [];
+
+        // 入力用
+        let inputStartX = 0, inputStartY = 0;
+        let isInputActive = false, hasMovedSignificantly = false;
+        const MOVE_THRESHOLD = 30;
+
+        const canvas = document.getElementById('gameCanvas'), ctx = canvas.getContext('2d');
+        const nCanvas = document.getElementById('nextCanvas'), nctx = nCanvas.getContext('2d');
+
+        function resizeCanvas() {
+            const isPortrait = window.innerHeight > window.innerWidth;
+            let availableHeight = window.innerHeight * 0.9;
+            let availableWidth = window.innerWidth * 0.9;
+
+            if (isPortrait) availableHeight = window.innerHeight * 0.7;
+            else availableWidth = window.innerWidth * 0.7;
+
+            const sizeH = availableHeight / CONFIG.ROWS_VIEW;
+            const sizeW = availableWidth / CONFIG.COLS;
+            CONFIG.SIZE = Math.floor(Math.min(sizeH, sizeW));
+
+            canvas.width = CONFIG.SIZE * CONFIG.COLS;
+            canvas.height = CONFIG.SIZE * CONFIG.ROWS_VIEW;
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+
+        function initGame() {
+            field = Array.from({ length: CONFIG.ROWS_DATA }, () => Array(CONFIG.COLS).fill(0));
+            // 初期配置：下部に少しブロックを配置
+            for (let r = 110; r < 125; r++) {
+                for (let c = 0; c < CONFIG.COLS; c++) {
+                    if (Math.random() < 0.5) field[r][c] = CONFIG.BLOCK_TYPES.HARD;
+                }
+            }
+            nextPiece = generatePieceData(0);
+            gameState = 'TITLE'; isSettling = false;
+            flashingLines = [];
+            const topRow = getTopRow();
+            viewOffsetY = targetViewOffsetY = Math.max(0, topRow - 7);
+            updateDepthUI();
+        }
+
+        function getTopRow() {
+            for (let r = 0; r < CONFIG.ROWS_DATA; r++) { if (field[r].some(cell => cell !== 0)) return r; }
+            return CONFIG.ROWS_DATA - 1;
+        }
+
+        function generatePieceData(spawnY) {
+            const p = { x: 4, y: spawnY, blocks: [], fallSpeed: CONFIG.SPEED_BASE_UNIT };
+            // テトリス風の形状パターン
+            const shapes = [
+                [[0, 0], [1, 0]],
+                [[0, 0], [0, 1]],
+                [[0, 0], [1, 0], [0, 1]],
+                [[0, 0], [1, 0], [1, 1]],
+                [[0, 0], [0, 1], [1, 1]]
+            ];
+            const shape = shapes[Math.floor(Math.random() * shapes.length)];
+            p.blocks = shape.map(v => ({ relX: v[0], relY: v[1], type: CONFIG.BLOCK_TYPES.HARD }));
+            return p;
+        }
+
+        async function spawnNext() {
+            if (gameState !== 'PLAYING') return;
+            const topRow = getTopRow();
+            const spawnY = Math.max(0, topRow - 7);
+            targetViewOffsetY = spawnY;
+            isCameraMoving = true;
+            while (Math.abs(viewOffsetY - targetViewOffsetY) > 0.05) { await new Promise(r => requestAnimationFrame(r)); }
+            isCameraMoving = false;
+            currentPiece = nextPiece;
+            currentPiece.y = spawnY;
+            nextPiece = generatePieceData(spawnY);
+        }
+
+        function checkCollision(dx, dy, blocks = currentPiece.blocks) {
+            if (!currentPiece) return false;
+            return blocks.some(b => {
+                let nx = Math.floor(currentPiece.x + b.relX + dx);
+                let ny = Math.ceil(currentPiece.y + b.relY + dy - 0.05);
+                if (nx < 0 || nx >= CONFIG.COLS || ny >= CONFIG.ROWS_DATA) return true;
+                if (ny >= 0 && field[ny][nx]) return true;
+                return false;
+            });
+        }
+
+        async function checkLineClear() {
+            let linesToClear = [];
+            for (let r = 0; r < CONFIG.ROWS_DATA; r++) {
+                if (field[r].every(cell => cell !== 0)) linesToClear.push(r);
+            }
+            if (linesToClear.length > 0) {
+                flashingLines = [...linesToClear];
+                await new Promise(res => setTimeout(res, 300));
+                flashingLines = [];
+                field = field.filter((_, i) => !linesToClear.includes(i));
+                while (field.length < CONFIG.ROWS_DATA) field.unshift(Array(CONFIG.COLS).fill(0));
+                await applyGlobalGravity();
+            }
+        }
+
+        async function applyGlobalGravity() {
+            let moved = true;
+            while (moved) {
+                moved = false;
+                for (let r = CONFIG.ROWS_DATA - 2; r >= 0; r--) {
+                    for (let c = 0; c < CONFIG.COLS; c++) {
+                        if (field[r][c] !== 0 && field[r + 1][c] === 0) {
+                            field[r + 1][c] = field[r][c]; field[r][c] = 0; moved = true;
+                        }
+                    }
+                }
+                if (moved) { drawAll(); await new Promise(res => setTimeout(res, 30)); }
+            }
+        }
+
+        function drawAll() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (gameState === 'TITLE') {
+                ctx.fillStyle = "white"; ctx.textAlign = "center";
+                ctx.font = `bold ${CONFIG.SIZE * 0.8}px Arial`;
+                ctx.fillText("BLOCK PUZZLE", canvas.width / 2, canvas.height / 2 - 20);
+                ctx.font = `${CONFIG.SIZE * 0.4}px Arial`;
+                ctx.fillText("Click to Start", canvas.width / 2, canvas.height / 2 + 30);
+                return;
+            }
+            if (Math.abs(viewOffsetY - targetViewOffsetY) > 0.01) {
+                viewOffsetY += (targetViewOffsetY - viewOffsetY) * CONFIG.CAMERA_SMOOTH;
+            }
+            for (let r = Math.floor(viewOffsetY); r < Math.floor(viewOffsetY) + CONFIG.ROWS_VIEW + 1; r++) {
+                if (r >= 0 && r < CONFIG.ROWS_DATA) {
+                    for (let c = 0; c < CONFIG.COLS; c++) {
+                        const type = field[r][c];
+                        const px = c * CONFIG.SIZE, py = (r - viewOffsetY) * CONFIG.SIZE;
+                        if (type === CONFIG.BLOCK_TYPES.HARD) {
+                            ctx.fillStyle = CONFIG.COLORS.HARD_STROKE; ctx.fillRect(px, py, CONFIG.SIZE, CONFIG.SIZE);
+                            ctx.fillStyle = CONFIG.COLORS.HARD_FILL; ctx.fillRect(px + 2, py + 2, CONFIG.SIZE - 4, CONFIG.SIZE - 4);
+                        }
+                        if (flashingLines.includes(r)) { ctx.fillStyle = "rgba(255, 255, 255, 0.8)"; ctx.fillRect(px, py, CONFIG.SIZE, CONFIG.SIZE); }
+                    }
+                }
+            }
+            if (currentPiece && !isCameraMoving) {
+                currentPiece.blocks.forEach(b => {
+                    const px = (currentPiece.x + b.relX) * CONFIG.SIZE, py = (currentPiece.y + b.relY - viewOffsetY) * CONFIG.SIZE;
+                    ctx.fillStyle = CONFIG.COLORS.HARD_STROKE; ctx.fillRect(px, py, CONFIG.SIZE, CONFIG.SIZE);
+                    ctx.fillStyle = CONFIG.COLORS.HARD_FILL; ctx.fillRect(px + 2, py + 2, CONFIG.SIZE - 4, CONFIG.SIZE - 4);
+                });
+            }
+            updateDepthUI();
+        }
+
+        function updateDepthUI() {
+            const currentDepth = Math.max(0, Math.floor(viewOffsetY + 5));
+            document.getElementById('depth').innerText = currentDepth + "m";
+        }
+
+        function rotatePiece() {
+            if (!currentPiece) return;
+            const rotated = currentPiece.blocks.map(b => ({ relX: -b.relY, relY: b.relX, type: b.type }));
+            for (let ox of [0, 1, -1, 2, -2]) { if (!checkCollision(ox, 0, rotated)) { currentPiece.x += ox; currentPiece.blocks = rotated; break; } }
+        }
+
+        async function settle() {
+            if (isSettling) return;
+            isSettling = true;
+            currentPiece.blocks.forEach(b => {
+                const fy = Math.round(currentPiece.y + b.relY), fx = Math.round(currentPiece.x + b.relX);
+                if (fy >= 0 && fy < CONFIG.ROWS_DATA) field[fy][fx] = b.type;
+            });
+            currentPiece = null;
+            await applyGlobalGravity();
+            await checkLineClear();
+            setTimeout(() => { isSettling = false; if (gameState === 'PLAYING') spawnNext(); }, CONFIG.NEXT_TURN_WAIT);
+        }
+
+        function loop() {
+            if (gameState === 'PLAYING' && !isSettling && !isCameraMoving) {
+                if (!currentPiece) spawnNext();
+                else {
+                    if (!checkCollision(0, currentPiece.fallSpeed)) currentPiece.y += currentPiece.fallSpeed;
+                    else { currentPiece.y = Math.floor(currentPiece.y + 0.1); settle(); }
+                }
+            }
+            drawAll(); requestAnimationFrame(loop);
+            nctx.clearRect(0, 0, 80, 80);
+            if (nextPiece) nextPiece.blocks.forEach(b => {
+                const px = (b.relX + 1) * 20, py = (b.relY + 1) * 20;
+                nctx.fillStyle = CONFIG.COLORS.HARD_FILL; nctx.fillRect(px, py, 18, 18);
+            });
+        }
+
+        function startInput(ex, ey) {
+            if (gameState === 'TITLE') { initGame(); gameState = 'PLAYING'; spawnNext(); return; }
+            if (gameState !== 'PLAYING' || isSettling || !currentPiece || isCameraMoving) return;
+            isInputActive = true; hasMovedSignificantly = false;
+            inputStartX = ex; inputStartY = ey;
+        }
+
+        function moveInput(ex, ey) {
+            if (!isInputActive || !currentPiece) return;
+            if (Math.abs(ex - inputStartX) > MOVE_THRESHOLD) {
+                hasMovedSignificantly = true;
+                const moveDir = ex > inputStartX ? 1 : -1;
+                if (!checkCollision(moveDir, 0)) { currentPiece.x += moveDir; inputStartX = ex; }
+            }
+            if (ey - inputStartY > 50) { hasMovedSignificantly = true; currentPiece.fallSpeed = CONFIG.SPEED_DOWN; }
+        }
+
+        function endInput() {
+            if (!isInputActive) return;
+            if (!hasMovedSignificantly) rotatePiece();
+            if (currentPiece) currentPiece.fallSpeed = CONFIG.SPEED_BASE_UNIT;
+            isInputActive = false;
+        }
+
+        window.addEventListener('touchstart', e => { startInput(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
+        window.addEventListener('touchmove', e => { e.preventDefault(); moveInput(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
+        window.addEventListener('touchend', endInput);
+        window.addEventListener('mousedown', e => { if (e.button === 0) startInput(e.clientX, e.clientY); });
+        window.addEventListener('mousemove', e => { if (isInputActive) moveInput(e.clientX, e.clientY); });
+        window.addEventListener('mouseup', e => { if (e.button === 0) endInput(); });
+        window.addEventListener('keydown', e => {
+            if (gameState !== 'PLAYING' || isSettling || !currentPiece || isCameraMoving) return;
+            if (e.key === 'ArrowLeft' && !checkCollision(-1, 0)) currentPiece.x--;
+            if (e.key === 'ArrowRight' && !checkCollision(1, 0)) currentPiece.x++;
+            if (e.key === 'ArrowDown') currentPiece.fallSpeed = CONFIG.SPEED_DOWN;
+            if (e.key === 'ArrowUp' || e.code === 'Space') rotatePiece();
+        });
+        window.addEventListener('keyup', e => { if (e.key === 'ArrowDown' && currentPiece) currentPiece.fallSpeed = CONFIG.SPEED_BASE_UNIT; });
+
+        resizeCanvas();
+        initGame();
+        loop();
+    </script>
+</body>
+
+</html>

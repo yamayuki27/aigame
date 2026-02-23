@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Tower Builder - Rising Edition</title>
+    <style>
+        :root {
+            --field-bg: #1a1a1a;
+            --panel-bg: rgba(40, 40, 40, 0.9);
+        }
+
+        body {
+            background: #000;
+            color: #eee;
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', sans-serif;
+            overflow: hidden;
+            user-select: none;
+            touch-action: none;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            width: 100vw;
+        }
+
+        #gameContainer {
+            position: relative;
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            height: 100%;
+        }
+
+        canvas#gameCanvas {
+            background: var(--field-bg);
+            box-shadow: 0 0 50px rgba(0, 0, 0, 0.8);
+            cursor: pointer;
+            display: block;
+        }
+
+        .side-panel {
+            background: var(--panel-bg);
+            padding: 15px;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            box-sizing: border-box;
+            backdrop-filter: blur(5px);
+            z-index: 10;
+            margin-left: 20px;
+            min-width: 140px;
+        }
+
+        .stat-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: #aaa;
+            text-transform: uppercase;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            font-family: monospace;
+            color: #fff;
+        }
+
+        #nextCanvas {
+            background: #000;
+            border-radius: 5px;
+        }
+
+        @media (max-aspect-ratio: 1/1) {
+            #gameContainer {
+                flex-direction: column;
+            }
+
+            .side-panel {
+                margin-left: 0;
+                margin-top: 10px;
+                width: 90%;
+                flex-direction: row;
+                justify-content: space-around;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div id="gameContainer">
+        <canvas id="gameCanvas"></canvas>
+        <div class="side-panel">
+            <div class="stat-group">
+                <div class="stat-label">FLOOR</div>
+                <div id="floorDisplay" class="stat-value">1F</div>
+            </div>
+            <div class="stat-group" style="align-items: center;">
+                <div class="stat-label" style="margin-bottom: 5px;">NEXT</div>
+                <canvas id="nextCanvas" width="80" height="80"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const CONFIG = {
+            ROWS_DATA: 500, COLS: 9, SIZE: 30, ROWS_VIEW: 15,
+            SPEED_BASE_UNIT: 0.0075,
+            SPEED_DOWN: 0.15,
+            CAMERA_SMOOTH: 0.08,
+            NEXT_TURN_WAIT: 200,
+            BLOCK_TYPES: { EMPTY: 0, NORMAL: 1, SOLID: 2 },
+            COLORS: {
+                NORMAL_FILL: '#d2691e', NORMAL_STROKE: '#5d2906',
+                SOLID_FILL: '#777', SOLID_STROKE: '#333'
+            }
+        };
+
+        let field, currentPiece, nextPiece, gameState, isSettling, isCameraMoving = false;
+        let viewOffsetY = 0, targetViewOffsetY = 0;
+        let currentMaxSolidRow = CONFIG.ROWS_DATA - 1; // 固まったラインの最上部
+
+        const canvas = document.getElementById('gameCanvas'), ctx = canvas.getContext('2d');
+        const nCanvas = document.getElementById('nextCanvas'), nctx = nCanvas.getContext('2d');
+
+        function resizeCanvas() {
+            const isPortrait = window.innerHeight > window.innerWidth;
+            let ah = window.innerHeight * (isPortrait ? 0.7 : 0.9);
+            let aw = window.innerWidth * (isPortrait ? 0.9 : 0.7);
+            CONFIG.SIZE = Math.floor(Math.min(ah / CONFIG.ROWS_VIEW, aw / CONFIG.COLS));
+            canvas.width = CONFIG.SIZE * CONFIG.COLS;
+            canvas.height = CONFIG.SIZE * CONFIG.ROWS_VIEW;
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+
+        function initGame() {
+            field = Array.from({ length: CONFIG.ROWS_DATA }, () => Array(CONFIG.COLS).fill(0));
+            // 最下部を床として固める
+            currentMaxSolidRow = CONFIG.ROWS_DATA - 1;
+            field[currentMaxSolidRow].fill(CONFIG.BLOCK_TYPES.SOLID);
+
+            nextPiece = generatePieceData();
+            gameState = 'TITLE';
+            isSettling = false;
+            // 初期カメラ位置を最下部に設定
+            viewOffsetY = targetViewOffsetY = currentMaxSolidRow - (CONFIG.ROWS_VIEW - 2);
+            updateUI();
+        }
+
+        function generatePieceData() {
+            const p = { x: 3, y: 0, blocks: [], fallSpeed: CONFIG.SPEED_BASE_UNIT };
+            const shapes = [
+                [[0, 0], [1, 0], [0, 1], [1, 1]], [[0, 0], [1, 0], [2, 0]], [[0, 0], [0, 1], [0, 2]],
+                [[0, 0], [1, 0], [1, 1]], [[0, 0], [0, 1], [1, 1]], [[0, 0], [1, 0], [2, 0], [1, 1]]
+            ];
+            const shape = shapes[Math.floor(Math.random() * shapes.length)];
+            p.blocks = shape.map(v => ({ relX: v[0], relY: v[1], type: CONFIG.BLOCK_TYPES.NORMAL }));
+            return p;
+        }
+
+        async function spawnNext() {
+            if (gameState !== 'PLAYING') return;
+            currentPiece = nextPiece;
+            // カメラの少し上から出現
+            currentPiece.y = viewOffsetY - 2;
+            nextPiece = generatePieceData();
+        }
+
+        function checkCollision(dx, dy, blocks = currentPiece.blocks) {
+            if (!currentPiece) return false;
+            return blocks.some(b => {
+                let nx = Math.floor(currentPiece.x + b.relX + dx);
+                let ny = Math.ceil(currentPiece.y + b.relY + dy - 0.05);
+                if (nx < 0 || nx >= CONFIG.COLS || ny >= CONFIG.ROWS_DATA) return true;
+                if (ny >= 0 && field[ny][nx]) return true;
+                return false;
+            });
+        }
+
+        async function solidifyLines() {
+            let newlySolidified = false;
+            for (let r = 0; r < CONFIG.ROWS_DATA; r++) {
+                if (field[r].every(cell => cell !== 0)) {
+                    // すでにSOLIDでない場合のみ更新
+                    if (field[r].some(cell => cell === CONFIG.BLOCK_TYPES.NORMAL)) {
+                        field[r].fill(CONFIG.BLOCK_TYPES.SOLID);
+                        if (r < currentMaxSolidRow) {
+                            currentMaxSolidRow = r;
+                            newlySolidified = true;
+                        }
+                    }
+                }
+            }
+            if (newlySolidified) {
+                // 固まったラインの少し上を捉えるようにカメラ移動
+                targetViewOffsetY = currentMaxSolidRow - (CONFIG.ROWS_VIEW - 4);
+                updateUI();
+            }
+        }
+
+        function drawBlock(px, py, type) {
+            const fill = type === CONFIG.BLOCK_TYPES.SOLID ? CONFIG.COLORS.SOLID_FILL : CONFIG.COLORS.NORMAL_FILL;
+            const stroke = type === CONFIG.BLOCK_TYPES.SOLID ? CONFIG.COLORS.SOLID_STROKE : CONFIG.COLORS.NORMAL_STROKE;
+            ctx.fillStyle = stroke; ctx.fillRect(px, py, CONFIG.SIZE, CONFIG.SIZE);
+            ctx.fillStyle = fill; ctx.fillRect(px + 2, py + 2, CONFIG.SIZE - 4, CONFIG.SIZE - 4);
+        }
+
+        function drawAll() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (gameState === 'TITLE') {
+                ctx.fillStyle = "white"; ctx.textAlign = "center";
+                ctx.font = `bold ${CONFIG.SIZE * 0.7}px Arial`;
+                ctx.fillText("TOWER BUILDER", canvas.width / 2, canvas.height / 2);
+                return;
+            }
+
+            // カメラスムーズ移動
+            viewOffsetY += (targetViewOffsetY - viewOffsetY) * CONFIG.CAMERA_SMOOTH;
+
+            const startR = Math.floor(viewOffsetY - 2);
+            const endR = Math.floor(viewOffsetY + CONFIG.ROWS_VIEW + 2);
+
+            for (let r = startR; r < endR; r++) {
+                if (r >= 0 && r < CONFIG.ROWS_DATA) {
+                    for (let c = 0; c < CONFIG.COLS; c++) {
+                        if (field[r][c]) drawBlock(c * CONFIG.SIZE, (r - viewOffsetY) * CONFIG.SIZE, field[r][c]);
+                    }
+                }
+            }
+
+            if (currentPiece) {
+                currentPiece.blocks.forEach(b => {
+                    const px = (currentPiece.x + b.relX) * CONFIG.SIZE;
+                    const py = (currentPiece.y + b.relY - viewOffsetY) * CONFIG.SIZE;
+                    drawBlock(px, py, b.type);
+                });
+            }
+        }
+
+        function updateUI() {
+            // 最下部(499)を1Fとしたカウントアップ
+            const floor = (CONFIG.ROWS_DATA - 1) - currentMaxSolidRow + 1;
+            document.getElementById('floorDisplay').innerText = floor + "F";
+        }
+
+        async function settle() {
+            if (isSettling) return;
+            isSettling = true;
+            currentPiece.blocks.forEach(b => {
+                const fy = Math.round(currentPiece.y + b.relY), fx = Math.round(currentPiece.x + b.relX);
+                if (fy >= 0 && fy < CONFIG.ROWS_DATA) field[fy][fx] = b.type;
+            });
+            currentPiece = null;
+            await solidifyLines();
+            setTimeout(() => { isSettling = false; if (gameState === 'PLAYING') spawnNext(); }, CONFIG.NEXT_TURN_WAIT);
+        }
+
+        function loop() {
+            if (gameState === 'PLAYING' && !isSettling) {
+                if (!currentPiece) spawnNext();
+                else {
+                    if (!checkCollision(0, currentPiece.fallSpeed)) currentPiece.y += currentPiece.fallSpeed;
+                    else { currentPiece.y = Math.floor(currentPiece.y + 0.1); settle(); }
+                }
+            }
+            drawAll(); requestAnimationFrame(loop);
+            nctx.clearRect(0, 0, 80, 80);
+            if (nextPiece) nextPiece.blocks.forEach(b => {
+                nctx.fillStyle = CONFIG.COLORS.NORMAL_FILL;
+                nctx.fillRect((b.relX + 1) * 20, (b.relY + 1) * 20, 18, 18);
+            });
+        }
+
+        // --- Input Handlers (PC & Mobile) ---
+        let inputStartX = 0, isInputActive = false, hasMoved = false;
+        function startInput(x) {
+            if (gameState === 'TITLE') { gameState = 'PLAYING'; spawnNext(); return; }
+            isInputActive = true; inputStartX = x; hasMoved = false;
+        }
+        function moveInput(x) {
+            if (!isInputActive || !currentPiece) return;
+            if (Math.abs(x - inputStartX) > 30) {
+                const dir = x > inputStartX ? 1 : -1;
+                if (!checkCollision(dir, 0)) { currentPiece.x += dir; inputStartX = x; hasMoved = true; }
+            }
+        }
+        window.addEventListener('mousedown', e => startInput(e.clientX));
+        window.addEventListener('mousemove', e => moveInput(e.clientX));
+        window.addEventListener('mouseup', () => {
+            if (isInputActive && !hasMoved) rotatePiece();
+            isInputActive = false;
+            if (currentPiece) currentPiece.fallSpeed = CONFIG.SPEED_BASE_UNIT;
+        });
+        window.addEventListener('touchstart', e => { e.preventDefault(); startInput(e.touches[0].clientX); }, { passive: false });
+        window.addEventListener('touchmove', e => { e.preventDefault(); moveInput(e.touches[0].clientX); }, { passive: false });
+        window.addEventListener('touchend', () => { if (isInputActive && !hasMoved) rotatePiece(); isInputActive = false; });
+
+        window.addEventListener('keydown', e => {
+            if (gameState !== 'PLAYING' || !currentPiece) return;
+            if (e.key === 'ArrowLeft' && !checkCollision(-1, 0)) currentPiece.x--;
+            if (e.key === 'ArrowRight' && !checkCollision(1, 0)) currentPiece.x++;
+            if (e.key === 'ArrowDown') currentPiece.fallSpeed = CONFIG.SPEED_DOWN;
+            if (e.key === 'ArrowUp' || e.code === 'Space') rotatePiece();
+        });
+        window.addEventListener('keyup', e => { if (e.key === 'ArrowDown' && currentPiece) currentPiece.fallSpeed = CONFIG.SPEED_BASE_UNIT; });
+
+        function rotatePiece() {
+            if (!currentPiece) return;
+            const rotated = currentPiece.blocks.map(b => ({ relX: -b.relY, relY: b.relX, type: b.type }));
+            for (let ox of [0, 1, -1]) { if (!checkCollision(ox, 0, rotated)) { currentPiece.x += ox; currentPiece.blocks = rotated; break; } }
+        }
+
+        resizeCanvas(); initGame(); loop();
+    </script>
+</body>
+
+</html>
