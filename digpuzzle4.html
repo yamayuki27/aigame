@@ -3,7 +3,8 @@
 
 <head>
     <meta charset="UTF-8">
-    <title>Iron Digger - Complete Edition</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Iron Digger - Full Screen Edition</title>
     <style>
         :root {
             --field-bg: #110c00;
@@ -18,48 +19,59 @@
             align-items: center;
             justify-content: center;
             height: 100vh;
+            width: 100vw;
             margin: 0;
+            padding: 0;
             font-family: 'Segoe UI', sans-serif;
             overflow: hidden;
             user-select: none;
             touch-action: none;
         }
 
-        canvas {
-            border: 4px solid #333;
-            background: var(--field-bg);
-            box-shadow: 0 0 40px rgba(0, 0, 0, 0.9);
-            cursor: pointer;
-        }
-
+        /* ゲーム全体のレイアウトコンテナ */
         .game-layout {
             display: flex;
-            gap: 20px;
+            gap: 15px;
+            align-items: flex-start;
+            max-width: 100%;
+            max-height: 100%;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+
+        canvas#gameCanvas {
+            border: 3px solid #333;
+            background: var(--field-bg);
+            box-shadow: 0 0 30px rgba(0, 0, 0, 0.9);
+            cursor: pointer;
+            /* 画面サイズに合わせて伸縮 */
+            max-height: 85vh;
+            max-width: 70vw;
+            object-fit: contain;
         }
 
         .side-panel {
             background: var(--panel-bg);
-            padding: 15px;
-            border-radius: 10px;
-            width: 140px;
+            padding: 10px;
+            border-radius: 8px;
+            width: 110px;
             display: flex;
             flex-direction: column;
-            gap: 12px;
+            gap: 8px;
+            box-sizing: border-box;
         }
 
         .stat-label {
-            font-size: 10px;
+            font-size: 9px;
             color: #888;
             text-transform: uppercase;
-            letter-spacing: 1px;
         }
 
         .stat-value {
-            font-size: 20px;
+            font-size: 16px;
             font-weight: bold;
             font-family: monospace;
             color: #fff;
-            margin-bottom: 5px;
         }
 
         .combo-box {
@@ -68,17 +80,32 @@
             text-shadow: 0 0 8px rgba(255, 255, 255, 0.5);
         }
 
-        @media (max-width: 500px) {
+        #nextCanvas {
+            width: 60px;
+            height: 60px;
+            background: #000;
+        }
+
+        /* スマホなどの縦長画面ではサイドパネルを下に回す */
+        @media (max-aspect-ratio: 1/1) {
             .game-layout {
                 flex-direction: column;
                 align-items: center;
+                justify-content: center;
             }
 
             .side-panel {
-                width: 270px;
+                width: 100%;
+                max-width: 270px;
                 flex-direction: row;
                 flex-wrap: wrap;
-                justify-content: space-around;
+                justify-content: space-between;
+                font-size: 12px;
+            }
+
+            canvas#gameCanvas {
+                max-width: 90vw;
+                max-height: 70vh;
             }
         }
     </style>
@@ -104,9 +131,8 @@
                 <div class="stat-label">COMBO</div>
                 <div id="comboCount" class="stat-value combo-box">0</div>
             </div>
-            <hr style="width:100%; border:0; border-top:1px solid #444;">
-            <div>
-                <div id="pCount" style="font-size: 11px; color: #5af;">Next in: 8</div>
+            <div style="text-align: center;">
+                <div id="pCount" style="font-size: 10px; color: #5af; margin-bottom: 2px;">Next in: 8</div>
                 <canvas id="nextCanvas" width="80" height="80"></canvas>
             </div>
         </div>
@@ -131,7 +157,6 @@
         let flashingLines = [];
         let scrollLostBlocks = [];
 
-        // 入力管理用
         let inputStartX = 0, inputStartY = 0;
         let lastInputX = 0, lastInputY = 0;
         let isInputActive = false;
@@ -340,9 +365,9 @@
         function drawAll(activeIrons = []) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             if (gameState === 'TITLE') {
-                ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.font = "bold 22px Arial";
+                ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.font = "bold 20px Arial";
                 ctx.fillText("IRON DIGGER", canvas.width / 2, 200);
-                ctx.font = "14px Arial"; ctx.fillText("Click / Tap / Press to Start", canvas.width / 2, 240);
+                ctx.font = "12px Arial"; ctx.fillText("Click / Tap / Press to Start", canvas.width / 2, 240);
                 return;
             }
             if (Math.abs(viewOffsetY - targetViewOffsetY) > 0.01) {
@@ -380,7 +405,7 @@
                 p.x += p.vx; p.y += p.vy; p.life -= 0.05; if (p.life <= 0) particles.splice(i, 1);
             });
             floatingTexts.forEach((ft, i) => {
-                ctx.globalAlpha = ft.life; ctx.fillStyle = "#ffffff"; ctx.font = "bold 18px Arial"; ctx.textAlign = "center";
+                ctx.globalAlpha = ft.life; ctx.fillStyle = "#ffffff"; ctx.font = "bold 16px Arial"; ctx.textAlign = "center";
                 ctx.fillText(ft.text + "!", ft.x, (ft.y - viewOffsetY * CONFIG.SIZE));
                 ft.y -= 0.5; ft.life -= 0.02; if (ft.life <= 0) floatingTexts.splice(i, 1);
             });
@@ -447,59 +472,40 @@
             });
         }
 
-        // 入力開始 (Touch/Mouse 共通)
         function startInput(ex, ey) {
             if (gameState === 'TITLE') { initGame(); gameState = 'PLAYING'; spawnNext(); return; }
             if (gameState !== 'PLAYING' || isSettling || !currentPiece || isCameraMoving) return;
-            isInputActive = true;
-            hasMovedSignificantly = false;
+            isInputActive = true; hasMovedSignificantly = false;
             inputStartX = ex; inputStartY = ey;
             lastInputX = ex; lastInputY = ey;
         }
 
-        // 入力移動 (Touch/Mouse 共通)
         function moveInput(ex, ey) {
             if (!isInputActive || !currentPiece) return;
-            const dx = ex - inputStartX;
-            const dy = ey - inputStartY;
-
-            // 左右移動判定
             if (Math.abs(ex - inputStartX) > MOVE_THRESHOLD) {
                 hasMovedSignificantly = true;
                 const moveDir = ex > inputStartX ? 1 : -1;
-                if (!checkCollision(moveDir, 0)) {
-                    currentPiece.x += moveDir;
-                    lastMoveDir = moveDir;
-                    inputStartX = ex; // 連続移動用
-                }
+                if (!checkCollision(moveDir, 0)) { currentPiece.x += moveDir; lastMoveDir = moveDir; inputStartX = ex; }
             }
-            // 高速落下判定
-            if (ey - inputStartY > 50) {
-                hasMovedSignificantly = true;
-                currentPiece.fallSpeed = CONFIG.SPEED_DOWN;
-            }
+            if (ey - inputStartY > 50) { hasMovedSignificantly = true; currentPiece.fallSpeed = CONFIG.SPEED_DOWN; }
             lastInputX = ex; lastInputY = ey;
         }
 
-        // 入力終了 (Touch/Mouse 共通)
         function endInput() {
             if (!isInputActive) return;
-            if (!hasMovedSignificantly) rotatePiece(); // 動いてなければ回転
+            if (!hasMovedSignificantly) rotatePiece();
             if (currentPiece) currentPiece.fallSpeed = CONFIG.SPEED_BASE_UNIT;
             isInputActive = false;
         }
 
-        // Touch Event Listeners
         window.addEventListener('touchstart', e => { startInput(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
         window.addEventListener('touchmove', e => { e.preventDefault(); moveInput(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
         window.addEventListener('touchend', e => { endInput(); });
 
-        // Mouse Event Listeners
         window.addEventListener('mousedown', e => { if (e.button === 0) startInput(e.clientX, e.clientY); });
         window.addEventListener('mousemove', e => { if (isInputActive) moveInput(e.clientX, e.clientY); });
         window.addEventListener('mouseup', e => { if (e.button === 0) endInput(); });
 
-        // Key Event Listeners
         window.addEventListener('keydown', e => {
             if (gameState !== 'PLAYING' || isSettling || !currentPiece || isCameraMoving) return;
             if (e.key === 'ArrowLeft' && !checkCollision(-1, 0)) { currentPiece.x--; lastMoveDir = -1; }
