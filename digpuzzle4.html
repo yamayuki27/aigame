@@ -4,135 +4,130 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Iron Digger - Full Screen Edition</title>
+    <title>Iron Digger - Maximum Screen Edition</title>
     <style>
         :root {
             --field-bg: #110c00;
-            --panel-bg: #222;
+            --panel-bg: rgba(34, 34, 34, 0.9);
         }
 
         body {
             background: #0a0a0a;
             color: #eee;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            width: 100vw;
             margin: 0;
             padding: 0;
             font-family: 'Segoe UI', sans-serif;
             overflow: hidden;
             user-select: none;
             touch-action: none;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            width: 100vw;
         }
 
-        /* ゲーム全体のレイアウトコンテナ */
-        .game-layout {
+        #gameContainer {
+            position: relative;
             display: flex;
-            gap: 15px;
-            align-items: flex-start;
-            max-width: 100%;
-            max-height: 100%;
-            padding: 10px;
-            box-sizing: border-box;
+            flex-direction: row;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            height: 100%;
         }
 
         canvas#gameCanvas {
-            border: 3px solid #333;
             background: var(--field-bg);
-            box-shadow: 0 0 30px rgba(0, 0, 0, 0.9);
+            box-shadow: 0 0 50px rgba(0, 0, 0, 1);
             cursor: pointer;
-            /* 画面サイズに合わせて伸縮 */
-            max-height: 85vh;
-            max-width: 70vw;
-            object-fit: contain;
+            display: block;
         }
 
+        /* UIパネル：PCでは右側、スマホでは下部/オーバーレイ */
         .side-panel {
             background: var(--panel-bg);
-            padding: 10px;
-            border-radius: 8px;
-            width: 110px;
+            padding: 15px;
+            border-radius: 12px;
             display: flex;
             flex-direction: column;
-            gap: 8px;
+            gap: 15px;
             box-sizing: border-box;
+            backdrop-filter: blur(5px);
+            z-index: 10;
+            margin-left: 20px;
+            min-width: 140px;
+        }
+
+        .stat-group {
+            display: flex;
+            flex-direction: column;
         }
 
         .stat-label {
-            font-size: 9px;
-            color: #888;
+            font-size: 11px;
+            color: #aaa;
             text-transform: uppercase;
+            letter-spacing: 1px;
         }
 
         .stat-value {
-            font-size: 16px;
+            font-size: 24px;
             font-weight: bold;
             font-family: monospace;
             color: #fff;
         }
 
-        .combo-box {
-            color: #fff;
-            font-style: italic;
-            text-shadow: 0 0 8px rgba(255, 255, 255, 0.5);
-        }
-
         #nextCanvas {
-            width: 60px;
-            height: 60px;
             background: #000;
+            border-radius: 5px;
         }
 
-        /* スマホなどの縦長画面ではサイドパネルを下に回す */
+        /* スマホ向け（縦長画面）のレイアウト最適化 */
         @media (max-aspect-ratio: 1/1) {
-            .game-layout {
+            #gameContainer {
                 flex-direction: column;
-                align-items: center;
-                justify-content: center;
             }
 
             .side-panel {
-                width: 100%;
-                max-width: 270px;
+                margin-left: 0;
+                margin-top: 10px;
+                width: 90%;
                 flex-direction: row;
                 flex-wrap: wrap;
-                justify-content: space-between;
-                font-size: 12px;
+                justify-content: space-around;
+                padding: 10px;
             }
 
-            canvas#gameCanvas {
-                max-width: 90vw;
-                max-height: 70vh;
+            .stat-value {
+                font-size: 18px;
             }
         }
     </style>
 </head>
 
 <body>
-    <div class="game-layout">
-        <canvas id="gameCanvas" width="270" height="450"></canvas>
+    <div id="gameContainer">
+        <canvas id="gameCanvas"></canvas>
         <div class="side-panel">
-            <div>
+            <div class="stat-group">
                 <div class="stat-label">BEST</div>
                 <div id="bestScore" class="stat-value">0</div>
             </div>
-            <div>
+            <div class="stat-group">
                 <div class="stat-label">DESTROYED</div>
                 <div id="curCount" class="stat-value">0</div>
             </div>
-            <div>
+            <div class="stat-group">
                 <div class="stat-label">DEPTH</div>
                 <div id="depth" class="stat-value">0m</div>
             </div>
-            <div id="comboArea" style="visibility:hidden;">
+            <div id="comboArea" style="visibility:hidden;" class="stat-group">
                 <div class="stat-label">COMBO</div>
-                <div id="comboCount" class="stat-value combo-box">0</div>
+                <div id="comboCount" class="stat-value" style="color: #ffeb3b; font-style: italic;">0</div>
             </div>
-            <div style="text-align: center;">
-                <div id="pCount" style="font-size: 10px; color: #5af; margin-bottom: 2px;">Next in: 8</div>
+            <div class="stat-group" style="align-items: center;">
+                <div id="pCount" style="font-size: 11px; color: #5af; margin-bottom: 5px;">Next in: 8</div>
                 <canvas id="nextCanvas" width="80" height="80"></canvas>
             </div>
         </div>
@@ -157,14 +152,40 @@
         let flashingLines = [];
         let scrollLostBlocks = [];
 
-        let inputStartX = 0, inputStartY = 0;
-        let lastInputX = 0, lastInputY = 0;
-        let isInputActive = false;
-        let hasMovedSignificantly = false;
+        // 入力用
+        let inputStartX = 0, inputStartY = 0, lastInputX = 0, lastInputY = 0;
+        let isInputActive = false, hasMovedSignificantly = false;
         const MOVE_THRESHOLD = 30;
 
         const canvas = document.getElementById('gameCanvas'), ctx = canvas.getContext('2d');
         const nCanvas = document.getElementById('nextCanvas'), nctx = nCanvas.getContext('2d');
+
+        // ウィンドウサイズに合わせてキャンバスをリサイズする関数
+        function resizeCanvas() {
+            const container = document.getElementById('gameContainer');
+            const isPortrait = window.innerHeight > window.innerWidth;
+
+            // 画面の高さや幅に合わせて1ブロックあたりのサイズ(CONFIG.SIZE)を再計算
+            let availableHeight = window.innerHeight * 0.9;
+            let availableWidth = window.innerWidth * 0.9;
+
+            if (isPortrait) {
+                availableHeight = window.innerHeight * 0.7; // スマホ時はUI領域を確保
+            } else {
+                availableWidth = window.innerWidth * 0.7; // PC時はサイドパネル分を空ける
+            }
+
+            const sizeH = availableHeight / CONFIG.ROWS_VIEW;
+            const sizeW = availableWidth / CONFIG.COLS;
+
+            // 小さすぎず、画面に収まる最大サイズを選択
+            CONFIG.SIZE = Math.floor(Math.min(sizeH, sizeW));
+
+            canvas.width = CONFIG.SIZE * CONFIG.COLS;
+            canvas.height = CONFIG.SIZE * CONFIG.ROWS_VIEW;
+        }
+
+        window.addEventListener('resize', resizeCanvas);
 
         function initGame() {
             field = Array.from({ length: CONFIG.ROWS_DATA }, () => Array(CONFIG.COLS).fill(0));
@@ -196,11 +217,7 @@
             if (isIron) {
                 p.blocks = [{ relX: 0, relY: 0, type: CONFIG.BLOCK_TYPES.IRON }];
             } else {
-                const shapes = [
-                    [[0, 0], [1, 0]], [[0, 0], [0, 1]],
-                    [[0, 0], [1, 0], [0, 1]], [[0, 0], [1, 0], [1, 1]],
-                    [[0, 0], [0, 1], [1, 1]]
-                ];
+                const shapes = [[[0, 0], [1, 0]], [[0, 0], [0, 1]], [[0, 0], [1, 0], [0, 1]], [[0, 0], [1, 0], [1, 1]], [[0, 0], [0, 1], [1, 1]]];
                 const shape = shapes[Math.floor(Math.random() * shapes.length)];
                 p.blocks = shape.map(v => ({ relX: v[0], relY: v[1], type: Math.random() < 0.3 ? 1 : 2 }));
             }
@@ -297,8 +314,7 @@
                         await moveIron(iron, nextC, curR, CONFIG.IRON_SPEED_LINEAR, activeIrons);
                         processing = true; continue;
                     }
-                    iron.dir *= -1;
-                    iron.bounceCount++;
+                    iron.dir *= -1; iron.bounceCount++;
                     if (iron.bounceCount >= CONFIG.MAX_BOUNCE * 2) {
                         iron.dead = true;
                         createParticles(iron.x, iron.y, "#ff3333");
@@ -353,21 +369,23 @@
             ctx.fillStyle = '#cc0000'; ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
             ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.arc(px, py + r * 0.1, r * 0.9, 0, Math.PI, false); ctx.fill();
             ctx.fillStyle = 'white'; ctx.beginPath(); ctx.arc(px - r * 0.4, py - r * 0.4, r * 0.2, 0, Math.PI * 2); ctx.fill();
-            ctx.strokeStyle = 'white'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.beginPath(); ctx.arc(px, py, r * 0.7, -1.8, -1.0); ctx.stroke();
+            ctx.strokeStyle = 'white'; ctx.lineWidth = Math.max(1, CONFIG.SIZE / 15); ctx.lineCap = 'round'; ctx.beginPath(); ctx.arc(px, py, r * 0.7, -1.8, -1.0); ctx.stroke();
         }
 
         function drawGlassBlock(px, py) {
-            ctx.fillStyle = CONFIG.COLORS.SOFT_FILL; ctx.beginPath(); ctx.roundRect(px + 2, py + 2, CONFIG.SIZE - 4, CONFIG.SIZE - 4, 2); ctx.fill();
-            ctx.strokeStyle = "rgba(255,255,255,0.7)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(px + 5, py + 22); ctx.lineTo(px + 22, py + 5); ctx.stroke();
+            ctx.fillStyle = CONFIG.COLORS.SOFT_FILL; ctx.beginPath(); ctx.roundRect(px + 2, py + 2, CONFIG.SIZE - 4, CONFIG.SIZE - 4, 4); ctx.fill();
+            ctx.strokeStyle = "rgba(255,255,255,0.7)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(px + 5, py + CONFIG.SIZE - 8); ctx.lineTo(px + CONFIG.SIZE - 8, py + 5); ctx.stroke();
             ctx.strokeStyle = "white"; ctx.strokeRect(px + 3, py + 3, CONFIG.SIZE - 6, CONFIG.SIZE - 6);
         }
 
         function drawAll(activeIrons = []) {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             if (gameState === 'TITLE') {
-                ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.font = "bold 20px Arial";
-                ctx.fillText("IRON DIGGER", canvas.width / 2, 200);
-                ctx.font = "12px Arial"; ctx.fillText("Click / Tap / Press to Start", canvas.width / 2, 240);
+                ctx.fillStyle = "white"; ctx.textAlign = "center";
+                ctx.font = `bold ${CONFIG.SIZE * 0.8}px Arial`;
+                ctx.fillText("IRON DIGGER", canvas.width / 2, canvas.height / 2 - 20);
+                ctx.font = `${CONFIG.SIZE * 0.4}px Arial`;
+                ctx.fillText("Click / Tap / Press to Start", canvas.width / 2, canvas.height / 2 + 30);
                 return;
             }
             if (Math.abs(viewOffsetY - targetViewOffsetY) > 0.01) {
@@ -380,7 +398,10 @@
                         const type = field[r][c];
                         const px = c * CONFIG.SIZE, py = (r - viewOffsetY) * CONFIG.SIZE;
                         if (type === 1) drawGlassBlock(px, py);
-                        else if (type === 2) { ctx.fillStyle = CONFIG.COLORS.HARD_STROKE; ctx.fillRect(px, py, CONFIG.SIZE, CONFIG.SIZE); ctx.fillStyle = CONFIG.COLORS.HARD_FILL; ctx.fillRect(px + 2, py + 2, CONFIG.SIZE - 4, CONFIG.SIZE - 4); }
+                        else if (type === 2) {
+                            ctx.fillStyle = CONFIG.COLORS.HARD_STROKE; ctx.fillRect(px, py, CONFIG.SIZE, CONFIG.SIZE);
+                            ctx.fillStyle = CONFIG.COLORS.HARD_FILL; ctx.fillRect(px + 2, py + 2, CONFIG.SIZE - 4, CONFIG.SIZE - 4);
+                        }
                         if (flashingLines.includes(r)) { ctx.fillStyle = "rgba(255, 255, 255, 0.8)"; ctx.fillRect(px, py, CONFIG.SIZE, CONFIG.SIZE); }
                     }
                 }
@@ -405,7 +426,7 @@
                 p.x += p.vx; p.y += p.vy; p.life -= 0.05; if (p.life <= 0) particles.splice(i, 1);
             });
             floatingTexts.forEach((ft, i) => {
-                ctx.globalAlpha = ft.life; ctx.fillStyle = "#ffffff"; ctx.font = "bold 16px Arial"; ctx.textAlign = "center";
+                ctx.globalAlpha = ft.life; ctx.fillStyle = "#ffffff"; ctx.font = `bold ${CONFIG.SIZE * 0.6}px Arial`; ctx.textAlign = "center";
                 ctx.fillText(ft.text + "!", ft.x, (ft.y - viewOffsetY * CONFIG.SIZE));
                 ft.y -= 0.5; ft.life -= 0.02; if (ft.life <= 0) floatingTexts.splice(i, 1);
             });
@@ -501,11 +522,9 @@
         window.addEventListener('touchstart', e => { startInput(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
         window.addEventListener('touchmove', e => { e.preventDefault(); moveInput(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
         window.addEventListener('touchend', e => { endInput(); });
-
         window.addEventListener('mousedown', e => { if (e.button === 0) startInput(e.clientX, e.clientY); });
         window.addEventListener('mousemove', e => { if (isInputActive) moveInput(e.clientX, e.clientY); });
         window.addEventListener('mouseup', e => { if (e.button === 0) endInput(); });
-
         window.addEventListener('keydown', e => {
             if (gameState !== 'PLAYING' || isSettling || !currentPiece || isCameraMoving) return;
             if (e.key === 'ArrowLeft' && !checkCollision(-1, 0)) { currentPiece.x--; lastMoveDir = -1; }
@@ -515,7 +534,9 @@
         });
         window.addEventListener('keyup', e => { if (e.key === 'ArrowDown' && currentPiece) currentPiece.fallSpeed = CONFIG.SPEED_BASE_UNIT; });
 
-        initGame(); loop();
+        resizeCanvas();
+        initGame();
+        loop();
     </script>
 </body>
 
