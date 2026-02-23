@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Tower Builder - Tetris Slide Logic</title>
+    <title>Tower Builder - Touch Improved</title>
     <style>
         :root {
             --field-bg: #1a1a1a;
@@ -116,12 +116,12 @@
         const CONFIG = {
             ROWS_DATA: 500, COLS: 9, SIZE: 30, ROWS_VIEW: 15,
             SPEED_BASE_UNIT: 0.01,
-            SPEED_DOWN: 0.15,
+            SPEED_DOWN: 0.2, // 下スライド時の速度
             CAMERA_SMOOTH: 0.08,
             NEXT_TURN_WAIT: 200,
             BLOCK_TYPES: { EMPTY: 0, NORMAL: 1, SOLID: 2 },
             COLORS: {
-                NORMAL_FILL: '#9b59b6', NORMAL_STROKE: '#8e44ad',
+                NORMAL_FILL: '#3498db', NORMAL_STROKE: '#2980b9',
                 SOLID_FILL: '#bdc3c7', SOLID_STROKE: '#7f8c8d'
             }
         };
@@ -167,55 +167,30 @@
         }
 
         async function processLines() {
-            let linesToFlash = [];
-            let linesToSolidify = [];
-            let linesToRemove = [];
-
-            // 下から順にスキャン
+            let linesToFlash = [], linesToSolidify = [], linesToRemove = [];
             let currentBase = currentMaxSolidRow;
             for (let r = CONFIG.ROWS_DATA - 1; r >= 0; r--) {
                 const isFull = field[r].every(cell => cell !== 0);
-                const isAlreadySolidRow = field[r].every(cell => cell === CONFIG.BLOCK_TYPES.SOLID);
-                const hasNormalBlock = field[r].some(cell => cell === CONFIG.BLOCK_TYPES.NORMAL);
-
+                const isAlreadySolid = field[r].every(cell => cell === CONFIG.BLOCK_TYPES.SOLID);
                 if (isFull) {
-                    // 土台判定
                     if (r === currentBase || r === currentBase - 1) {
-                        if (hasNormalBlock) {
-                            linesToSolidify.push(r);
-                        }
+                        if (field[r].some(c => c === CONFIG.BLOCK_TYPES.NORMAL)) linesToSolidify.push(r);
                         currentBase = r;
-                    } else {
-                        // 土台に接していない空中ライン（コンクリートのみの行は除外）
-                        if (!isAlreadySolidRow) {
-                            linesToFlash.push(r);
-                            linesToRemove.push(r);
-                        }
+                    } else if (!isAlreadySolid) {
+                        linesToFlash.push(r); linesToRemove.push(r);
                     }
                 }
             }
-
             if (linesToFlash.length > 0 || linesToSolidify.length > 0) {
                 flashingLines = [...linesToFlash, ...linesToSolidify];
-                drawAll();
-                await new Promise(r => setTimeout(r, 200));
-                flashingLines = [];
+                drawAll(); await new Promise(r => setTimeout(r, 200)); flashingLines = [];
             }
-
-            // 1. コンクリート化
             linesToSolidify.forEach(r => field[r].fill(CONFIG.BLOCK_TYPES.SOLID));
-
-            // 2. 消去と詰め（テトリス方式）
             if (linesToRemove.length > 0) {
-                // 消去対象のインデックスをフィルタリング
                 let newField = field.filter((_, i) => !linesToRemove.includes(i));
-                // 上に足りない分を追加
-                while (newField.length < CONFIG.ROWS_DATA) {
-                    newField.unshift(Array(CONFIG.COLS).fill(0));
-                }
+                while (newField.length < CONFIG.ROWS_DATA) newField.unshift(Array(CONFIG.COLS).fill(0));
                 field = newField;
             }
-
             recalcMaxSolid();
             targetViewOffsetY = currentMaxSolidRow - (CONFIG.ROWS_VIEW - 4);
             updateUI();
@@ -223,19 +198,13 @@
 
         function recalcMaxSolid() {
             for (let r = 0; r < CONFIG.ROWS_DATA; r++) {
-                if (field[r].some(cell => cell === CONFIG.BLOCK_TYPES.SOLID)) {
-                    currentMaxSolidRow = r;
-                    return;
-                }
+                if (field[r].some(cell => cell === CONFIG.BLOCK_TYPES.SOLID)) { currentMaxSolidRow = r; return; }
             }
             currentMaxSolidRow = CONFIG.ROWS_DATA - 1;
         }
 
         function drawBlock(px, py, type, isFlashing) {
-            if (isFlashing) {
-                ctx.fillStyle = "#fff"; ctx.fillRect(px, py, CONFIG.SIZE, CONFIG.SIZE);
-                return;
-            }
+            if (isFlashing) { ctx.fillStyle = "#fff"; ctx.fillRect(px, py, CONFIG.SIZE, CONFIG.SIZE); return; }
             const fill = type === CONFIG.BLOCK_TYPES.SOLID ? CONFIG.COLORS.SOLID_FILL : CONFIG.COLORS.NORMAL_FILL;
             const stroke = type === CONFIG.BLOCK_TYPES.SOLID ? CONFIG.COLORS.SOLID_STROKE : CONFIG.COLORS.NORMAL_STROKE;
             ctx.fillStyle = stroke; ctx.fillRect(px, py, CONFIG.SIZE, CONFIG.SIZE);
@@ -248,6 +217,8 @@
                 ctx.fillStyle = "white"; ctx.textAlign = "center";
                 ctx.font = `bold ${CONFIG.SIZE * 0.7}px Arial`;
                 ctx.fillText("TOWER SLIDER", canvas.width / 2, canvas.height / 2);
+                ctx.font = `${CONFIG.SIZE * 0.4}px Arial`;
+                ctx.fillText("Tap: Rotate / Slide: Move & Drop", canvas.width / 2, canvas.height / 2 + 40);
                 return;
             }
             viewOffsetY += (targetViewOffsetY - viewOffsetY) * CONFIG.CAMERA_SMOOTH;
@@ -271,14 +242,12 @@
         }
 
         async function settle() {
-            if (isSettling) return;
-            isSettling = true;
+            if (isSettling) return; isSettling = true;
             currentPiece.blocks.forEach(b => {
                 const fy = Math.round(currentPiece.y + b.relY), fx = Math.round(currentPiece.x + b.relX);
                 if (fy >= 0 && fy < CONFIG.ROWS_DATA) field[fy][fx] = b.type;
             });
-            currentPiece = null;
-            await processLines();
+            currentPiece = null; await processLines();
             setTimeout(() => { isSettling = false; if (gameState === 'PLAYING') spawnNext(); }, CONFIG.NEXT_TURN_WAIT);
         }
 
@@ -298,20 +267,19 @@
             });
         }
 
-        // --- Inputs ---
-        let inputStartX = 0, isInputActive = false, hasMoved = false;
         function rotatePiece() {
             if (!currentPiece) return;
             const rotated = currentPiece.blocks.map(b => ({ relX: -b.relY, relY: b.relX, type: b.type }));
             for (let ox of [0, 1, -1, 2, -2]) { if (!checkCollision(ox, 0, rotated)) { currentPiece.x += ox; currentPiece.blocks = rotated; break; } }
         }
+
         function spawnNext() {
             if (gameState !== 'PLAYING') return;
-            currentPiece = nextPiece;
-            currentPiece.y = viewOffsetY - 2;
+            currentPiece = nextPiece; currentPiece.y = viewOffsetY - 2;
             nextPiece = generatePieceData();
-            if (checkCollision(0, 0)) { alert("GAME OVER! Height: " + document.getElementById('floorDisplay').innerText); initGame(); }
+            if (checkCollision(0, 0)) { alert("GAME OVER!"); initGame(); }
         }
+
         function checkCollision(dx, dy, blocks = currentPiece.blocks) {
             if (!currentPiece) return false;
             return blocks.some(b => {
@@ -322,9 +290,47 @@
                 return false;
             });
         }
-        window.addEventListener('mousedown', e => { if (gameState === 'TITLE') { gameState = 'PLAYING'; spawnNext(); } else { isInputActive = true; inputStartX = e.clientX; hasMoved = false; } });
-        window.addEventListener('mousemove', e => { if (isInputActive && currentPiece) { if (Math.abs(e.clientX - inputStartX) > 30) { const d = e.clientX > inputStartX ? 1 : -1; if (!checkCollision(d, 0)) { currentPiece.x += d; inputStartX = e.clientX; hasMoved = true; } } } });
-        window.addEventListener('mouseup', () => { if (isInputActive && !hasMoved) rotatePiece(); isInputActive = false; if (currentPiece) currentPiece.fallSpeed = CONFIG.SPEED_BASE_UNIT; });
+
+        // --- Improved Input Handlers ---
+        let startX = 0, startY = 0, isInputActive = false, hasMoved = false;
+
+        function handleStart(x, y) {
+            if (gameState === 'TITLE') { gameState = 'PLAYING'; spawnNext(); return; }
+            isInputActive = true; startX = x; startY = y; hasMoved = false;
+        }
+
+        function handleMove(x, y) {
+            if (!isInputActive || !currentPiece) return;
+            const dx = x - startX, dy = y - startY;
+
+            // 横スライド：移動
+            if (Math.abs(dx) > 30) {
+                const dir = dx > 0 ? 1 : -1;
+                if (!checkCollision(dir, 0)) { currentPiece.x += dir; startX = x; hasMoved = true; }
+            }
+            // 下スライド：高速落下
+            if (dy > 40) {
+                currentPiece.fallSpeed = CONFIG.SPEED_DOWN;
+                hasMoved = true;
+            } else if (dy < -20) { // 上に少し戻したら速度リセット
+                currentPiece.fallSpeed = CONFIG.SPEED_BASE_UNIT;
+            }
+        }
+
+        function handleEnd() {
+            if (!isInputActive) return;
+            if (!hasMoved) rotatePiece(); // スライドしてなければ回転
+            if (currentPiece) currentPiece.fallSpeed = CONFIG.SPEED_BASE_UNIT;
+            isInputActive = false;
+        }
+
+        window.addEventListener('mousedown', e => handleStart(e.clientX, e.clientY));
+        window.addEventListener('mousemove', e => handleMove(e.clientX, e.clientY));
+        window.addEventListener('mouseup', handleEnd);
+        window.addEventListener('touchstart', e => { e.preventDefault(); handleStart(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
+        window.addEventListener('touchmove', e => { e.preventDefault(); handleMove(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
+        window.addEventListener('touchend', handleEnd);
+
         window.addEventListener('keydown', e => {
             if (!currentPiece) return;
             if (e.key === 'ArrowLeft' && !checkCollision(-1, 0)) currentPiece.x--;
@@ -333,9 +339,6 @@
             if (e.key === 'ArrowUp' || e.code === 'Space') rotatePiece();
         });
         window.addEventListener('keyup', e => { if (e.key === 'ArrowDown' && currentPiece) currentPiece.fallSpeed = CONFIG.SPEED_BASE_UNIT; });
-        window.addEventListener('touchstart', e => { e.preventDefault(); if (gameState === 'TITLE') { gameState = 'PLAYING'; spawnNext(); } else { isInputActive = true; inputStartX = e.touches[0].clientX; hasMoved = false; } }, { passive: false });
-        window.addEventListener('touchmove', e => { e.preventDefault(); if (isInputActive && currentPiece) { if (Math.abs(e.touches[0].clientX - inputStartX) > 30) { const d = e.touches[0].clientX > inputStartX ? 1 : -1; if (!checkCollision(d, 0)) { currentPiece.x += d; inputStartX = e.touches[0].clientX; hasMoved = true; } } } }, { passive: false });
-        window.addEventListener('touchend', () => { if (isInputActive && !hasMoved) rotatePiece(); isInputActive = false; });
 
         resizeCanvas(); initGame(); loop();
     </script>
