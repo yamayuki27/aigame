@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Extreme Snowboard - Speed Controlled</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #d3d3d3;
+            font-family: 'Courier New', monospace;
+        }
+
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #00ff00;
+            padding: 15px;
+            border: 2px solid #00ff00;
+            line-height: 1.4;
+            z-index: 100;
+            min-width: 240px;
+        }
+
+        #msg {
+            position: absolute;
+            top: 40%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: black;
+            font-weight: bold;
+            font-size: 24px;
+            text-align: center;
+            pointer-events: none;
+        }
+
+        #minimap-container {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 300px;
+            height: 120px;
+            background: rgba(0, 0, 0, 0.7);
+            border: 2px solid #00ff00;
+            z-index: 100;
+        }
+
+        #minimap-canvas {
+            display: block;
+        }
+
+        .reset-msg {
+            color: #ff0000;
+            font-size: 18px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        SPEED : <span id="v_speed">0</span> km/h<br>
+        TIME : <span id="v_time">0.00</span>s<br>
+        BEST : <span id="v_best">--.--</span>s
+        <div id="reset_timer" class="reset-msg"></div>
+    </div>
+    <div id="msg">CLICK TO START</div>
+    <div id="minimap-container"><canvas id="minimap-canvas"></canvas></div>
+
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        let scene, camera, renderer, player, clock;
+        let gameStarted = false;
+        let startTime = 0;
+        let finalTime = null;
+        let bestTime = Infinity;
+        let resetCounter = 0;
+        const keys = { Left: false, Right: false };
+        const particles = [];
+        const courseSegments = [];
+
+        const stats = {
+            progress: 0,
+            speed: 0,
+            sideVel: 0,
+            lateralPos: 0,
+            height: 1.2,
+            cameraHeight: 35,
+            minSpeed: 300
+        };
+
+        const COURSE_WIDTH = 25;
+        const MAX_BANK_LIMIT = 0.15;
+
+        // --- コース設計 ---
+        const startY = 2200;
+        const cp_raw = [
+            [0, startY + 200, 600],
+            [0, startY, 0],
+            [100, startY - 400, -1500],
+            [0, startY - 200, -3000],
+            [450, startY - 600, -5000],
+            [600, startY - 850, -6000],
+            [450, startY - 1100, -7000],
+            [0, startY - 1300, -9000],
+            [-450, startY - 1600, -11500],
+            [-600, startY - 1850, -12500],
+            [-450, startY - 2100, -13500],
+            [150, startY - 1800, -16000],
+            [-150, startY - 2500, -19000],
+            [0, startY - 2400, -20500],
+            [0, startY - 2900, -23000],
+            [0, startY - 2910, -24000]
+        ];
+
+        const coursePoints = cp_raw.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+        const courseCurve = new THREE.CatmullRomCurve3(coursePoints, false, 'centripetal');
+
+        let minimapCanvas, minimapCtx, minimapPoints = [];
+
+        init();
+        animate();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xccddee);
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 100000);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.body.appendChild(renderer.domElement);
+
+            const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+            sun.position.set(2000, 4000, 2000);
+            scene.add(sun);
+            scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+
+            player = new THREE.Mesh(
+                new THREE.BoxGeometry(3.6, 0.8, 12),
+                new THREE.MeshLambertMaterial({ color: 0xff3333 })
+            );
+            const edges = new THREE.EdgesGeometry(player.geometry);
+            player.add(new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000 })));
+            scene.add(player);
+
+            createCourseMesh();
+            initMinimap();
+            clock = new THREE.Clock();
+
+            window.addEventListener('keydown', (e) => {
+                const k = e.key.toLowerCase();
+                if (k === 'a' || k === 'arrowleft') keys.Left = true;
+                if (k === 'd' || k === 'arrowright') keys.Right = true;
+            });
+            window.addEventListener('keyup', (e) => {
+                const k = e.key.toLowerCase();
+                if (k === 'a' || k === 'arrowleft') keys.Left = false;
+                if (k === 'd' || k === 'arrowright') keys.Right = false;
+            });
+            window.addEventListener('mousedown', () => {
+                if (!gameStarted) { gameStarted = true; document.getElementById('msg').style.display = 'none'; }
+            });
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function createCourseMesh() {
+            const segments = 4500;
+            const pts = courseCurve.getPoints(segments);
+            const snowMat = new THREE.MeshLambertMaterial({ color: 0xfafafa });
+            const lineMat = new THREE.MeshLambertMaterial({ color: 0xff0000 });
+            const blueMat = new THREE.MeshLambertMaterial({ color: 0x0066ff });
+            const poleGeo = new THREE.CylinderGeometry(0.4, 0.4, 15);
+
+            for (let i = 0; i < pts.length - 1; i++) {
+                const p1 = pts[i];
+                const p2 = pts[i + 1];
+                const progressRatio = i / segments;
+                const tangent = new THREE.Vector3().subVectors(p2, p1).normalize();
+                const nextTangent = (i < pts.length - 2) ? new THREE.Vector3().subVectors(pts[i + 2], p2).normalize() : tangent;
+
+                const cross = new THREE.Vector3().crossVectors(tangent, nextTangent);
+                const bankAngle = -cross.y * 220;
+
+                const group = new THREE.Group();
+                group.position.copy(p1.clone().lerp(p2, 0.5));
+                group.lookAt(p2);
+                group.rotation.z = bankAngle;
+
+                const isStartLine = (Math.abs(p1.z) < 20 && p1.z > -50);
+                const isGoalLine = (progressRatio > 0.996);
+
+                const floor = new THREE.Mesh(
+                    new THREE.BoxGeometry(COURSE_WIDTH, 1.5, p1.distanceTo(p2) + 5),
+                    (isStartLine || isGoalLine) ? lineMat : snowMat
+                );
+                group.add(floor);
+
+                if (i % 25 === 0 && progressRatio < 0.99) {
+                    const lp = new THREE.Mesh(poleGeo, blueMat); lp.position.set(-COURSE_WIDTH / 2 - 3, 7, 0); group.add(lp);
+                    const rp = new THREE.Mesh(poleGeo, blueMat); rp.position.set(COURSE_WIDTH / 2 + 3, 7, 0); group.add(rp);
+                }
+
+                scene.add(group);
+                courseSegments.push({ bank: bankAngle });
+            }
+        }
+
+        function initMinimap() {
+            minimapCanvas = document.getElementById('minimap-canvas');
+            minimapCtx = minimapCanvas.getContext('2d');
+            minimapCanvas.width = 300; minimapCanvas.height = 120;
+            const numPoints = 400;
+            const coursePathPoints = courseCurve.getPoints(numPoints);
+            let minY = Infinity, maxY = -Infinity;
+            for (const p of coursePathPoints) {
+                if (p.y < minY) minY = p.y;
+                if (p.y > maxY) maxY = p.y;
+            }
+            minimapPoints = coursePathPoints.map(p => ({
+                x: (coursePoints[0].z - p.z) / (coursePoints[0].z - coursePoints[coursePoints.length - 1].z) * 300,
+                y: (1 - (p.y - minY) / (maxY - minY)) * 100 + 10
+            }));
+        }
+
+        function updatePhysics(delta) {
+            const currentPos = courseCurve.getPoint(stats.progress);
+            const tangent = courseCurve.getTangent(stats.progress);
+            const segIdx = Math.floor(stats.progress * (courseSegments.length - 1));
+            const segData = courseSegments[segIdx] || { bank: 0 };
+
+            // 推進力
+            const slope = -tangent.y;
+            stats.speed += (slope * 3500 + 50) * delta;
+
+            const steerPower = 150;
+            if (keys.Left) stats.sideVel -= steerPower * delta;
+            if (keys.Right) stats.sideVel += steerPower * delta;
+            stats.sideVel *= 0.94;
+
+            let playerBank = THREE.MathUtils.clamp(stats.sideVel * 0.005, -MAX_BANK_LIMIT, MAX_BANK_LIMIT);
+            const frictionFactor = Math.abs(playerBank) / MAX_BANK_LIMIT;
+
+            // ★抵抗の再調整: 速度の2乗に比例する空気抵抗を追加
+            // airDrag = 1.0 - (基本抵抗 + 速度比例抵抗)
+            const airDrag = 1.0 - (0.000005 + Math.pow(stats.speed, 2) * 0.000000004);
+            // エッジ抵抗を少し重く (1/8 -> 約1/5へ)
+            const edgeResistance = 1.0 - (frictionFactor * 0.001);
+
+            stats.speed *= (airDrag * edgeResistance);
+
+            // 最低速度保証
+            if (stats.speed < stats.minSpeed) stats.speed = stats.minSpeed;
+            stats.speed = THREE.MathUtils.clamp(stats.speed, stats.minSpeed, 2500);
+
+            stats.progress += (stats.speed / courseCurve.getLength()) * delta;
+            if (stats.progress > 1) stats.progress = 1;
+
+            stats.lateralPos += stats.sideVel * delta;
+            stats.lateralPos = THREE.MathUtils.clamp(stats.lateralPos, -COURSE_WIDTH / 2 + 4, COURSE_WIDTH / 2 - 4);
+
+            const up = new THREE.Vector3(0, 1, 0);
+            const right = new THREE.Vector3().crossVectors(tangent, up).normalize();
+            const bankedUp = up.clone().applyAxisAngle(tangent, segData.bank);
+            const bankedRight = right.clone().applyAxisAngle(tangent, segData.bank);
+
+            player.position.copy(currentPos).add(bankedRight.multiplyScalar(stats.lateralPos)).add(bankedUp.multiplyScalar(stats.height));
+            player.lookAt(player.position.clone().add(tangent));
+            player.rotation.z = segData.bank + playerBank;
+
+            if (currentPos.z <= 0 && startTime === 0) startTime = performance.now();
+            if (stats.progress >= 0.998 && finalTime === null) {
+                finalTime = (performance.now() - startTime) / 1000;
+                if (finalTime < bestTime) {
+                    bestTime = finalTime;
+                    document.getElementById('v_best').innerText = bestTime.toFixed(2);
+                }
+                resetCounter = 5.0;
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = Math.min(clock.getDelta(), 0.05);
+
+            if (gameStarted && stats.progress < 1) {
+                updatePhysics(delta);
+                if (Math.random() < 0.3 && particles.length < 80) {
+                    const p = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.5, 1.5), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6 }));
+                    p.position.copy(player.position).add(new THREE.Vector3(0, -2, 0));
+                    p.userData.velocity = new THREE.Vector3((Math.random() - 0.5) * 15, Math.random() * 8, (Math.random() - 0.5) * 15);
+                    p.userData.life = 1.2;
+                    scene.add(p);
+                    particles.push(p);
+                }
+            }
+
+            if (finalTime !== null && resetCounter > 0) {
+                resetCounter -= delta;
+                document.getElementById('reset_timer').innerText = `RESET IN ${Math.ceil(resetCounter)}...`;
+                if (resetCounter <= 0) {
+                    stats.progress = 0; stats.speed = 0; stats.sideVel = 0; stats.lateralPos = 0;
+                    startTime = 0; finalTime = null; resetCounter = 0;
+                    document.getElementById('reset_timer').innerText = "";
+                    document.getElementById('msg').style.display = 'block';
+                    gameStarted = false;
+                }
+            }
+
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.position.add(p.userData.velocity.clone().multiplyScalar(delta));
+                p.userData.life -= delta * 1.5;
+                p.material.opacity = p.userData.life;
+                if (p.userData.life <= 0) { scene.remove(p); particles.splice(i, 1); }
+            }
+
+            const backDir = new THREE.Vector3(0, 0, -1).applyQuaternion(player.quaternion);
+            camera.position.lerp(player.position.clone().add(backDir.multiplyScalar(75)).add(new THREE.Vector3(0, stats.cameraHeight, 0)), 0.1);
+            camera.lookAt(player.position);
+
+            document.getElementById('v_speed').innerText = Math.floor(stats.speed / 10);
+            if (startTime > 0 && finalTime === null) document.getElementById('v_time').innerText = ((performance.now() - startTime) / 1000).toFixed(2);
+            else if (finalTime !== null) document.getElementById('v_time').innerText = finalTime.toFixed(2);
+
+            if (minimapCtx) {
+                minimapCtx.clearRect(0, 0, 300, 120);
+                minimapCtx.beginPath(); minimapCtx.strokeStyle = '#fff';
+                minimapCtx.moveTo(minimapPoints[0].x, minimapPoints[0].y);
+                for (let i = 1; i < minimapPoints.length; i++) minimapCtx.lineTo(minimapPoints[i].x, minimapPoints[i].y);
+                minimapCtx.stroke();
+                const pIdx = Math.floor(stats.progress * (minimapPoints.length - 1));
+                const pPos = minimapPoints[pIdx] || minimapPoints[0];
+                minimapCtx.beginPath(); minimapCtx.arc(pPos.x, pPos.y, 5, 0, Math.PI * 2);
+                minimapCtx.fillStyle = '#ff0000'; minimapCtx.fill();
+            }
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+    </script>
+</body>
+
+</html>

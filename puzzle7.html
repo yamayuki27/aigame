@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Puyo Prototype v38 - Line Clear Fix</title>
+    <style>
+        :root {
+            --field-bg: #001a00;
+            --panel-bg: #222;
+        }
+
+        body {
+            background: #111;
+            color: #eee;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            font-family: 'Segoe UI', sans-serif;
+            overflow: hidden;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none;
+        }
+
+        canvas {
+            border: 4px solid #333;
+            background: var(--field-bg);
+            box-shadow: 0 0 40px rgba(0, 0, 0, 0.8);
+            cursor: pointer;
+        }
+
+        .game-layout {
+            display: flex;
+            gap: 20px;
+        }
+
+        .side-panel {
+            background: var(--panel-bg);
+            padding: 15px;
+            border-radius: 10px;
+            width: 140px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #888;
+            margin-bottom: 2px;
+        }
+
+        .stat-value {
+            font-size: 20px;
+            font-weight: bold;
+            color: #fff;
+            font-family: monospace;
+        }
+
+        #status {
+            color: #ff4444;
+            font-weight: bold;
+            min-height: 1.2em;
+            font-size: 18px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="shake-container">
+        <div class="game-layout">
+            <canvas id="gameCanvas" width="270" height="450"></canvas>
+            <div class="side-panel">
+                <div>
+                    <div class="stat-label">LEVEL</div>
+                    <div id="levelVal" class="stat-value">1</div>
+                </div>
+                <div>
+                    <div class="stat-label">DESTROYED</div>
+                    <div id="curCount" class="stat-value">0</div>
+                </div>
+                <div>
+                    <div class="stat-label">BEST RECORD</div>
+                    <div id="bestCount" class="stat-value">0</div>
+                </div>
+                <hr style="width:100%; border:0; border-top:1px solid #444;">
+                <div>
+                    <div id="pCount" style="font-size: 12px; color: #5af;">Next in: 8</div>
+                    <canvas id="nextCanvas" width="80" height="80"></canvas>
+                </div>
+                <div id="status"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const CONFIG = {
+            ROWS: 15, COLS: 9, SIZE: 30,
+            SPEED_BASE_UNIT: 0.025, SPEED_DOWN: 0.4, SPEED_SCALE: 0.75, IRON_SPEED: 0.12,
+            DEADLINE_Y: 2, IDLE_LIMIT: 9,
+            BLOCK_TYPES: { EMPTY: 0, SOFT: 1, HARD: 2, IRON: 3 },
+            COLORS: { SOFT_FILL: 'rgba(180, 230, 255, 0.4)', SOFT_STROKE: 'rgba(255, 255, 255, 0.6)', HARD_FILL: '#888', HARD_STROKE: '#444' }
+        };
+
+        let field, currentPiece, nextPiece, gameState, isSettling;
+        let pieceCount, lastMoveDir, bestDestroyedRecord = 0, currentLevel;
+        let particles = [], floatingTexts = [];
+        let warningAnim = 0, flashingRows = [], flashState = false;
+
+        const canvas = document.getElementById('gameCanvas'), ctx = canvas.getContext('2d');
+        const nCanvas = document.getElementById('nextCanvas'), nctx = nCanvas.getContext('2d');
+
+        function initGame() {
+            field = Array.from({ length: CONFIG.ROWS }, () => Array(CONFIG.COLS).fill(0));
+            currentPiece = null; pieceCount = 0; currentLevel = 1;
+            nextPiece = generatePieceData(); gameState = 'TITLE';
+            isSettling = false; lastMoveDir = 1; particles = []; floatingTexts = [];
+            document.getElementById('status').innerText = ""; updateUI(0);
+        }
+
+        function generatePieceData() {
+            pieceCount++;
+            const isIron = pieceCount % 8 === 0;
+            const p = {
+                x: isIron ? 4 : 3, y: 0, blocks: [], isIronTurn: isIron,
+                fallSpeed: CONFIG.SPEED_BASE_UNIT * Math.pow(1.1, currentLevel - 1) * CONFIG.SPEED_SCALE
+            };
+            if (isIron) {
+                p.blocks = [{ relX: 0, relY: 0, type: CONFIG.BLOCK_TYPES.IRON }];
+            } else {
+                const shape = (Math.random() < 0.5) ? [[0, 0], [1, 0]] : [[0, 0], [0, 1]];
+                p.blocks = shape.map(v => ({ relX: v[0], relY: v[1], type: Math.random() < 0.5 ? 1 : 2 }));
+            }
+            return p;
+        }
+
+        function spawnNext() {
+            if (gameState !== 'PLAYING') return;
+            currentPiece = nextPiece; nextPiece = generatePieceData();
+            updateUI(null);
+            if (checkCollision(0, 0)) gameState = 'GAMEOVER';
+        }
+
+        function checkCollision(dx, dy, blocks = currentPiece.blocks) {
+            if (!currentPiece) return false;
+            return blocks.some(b => {
+                let nx = Math.floor(currentPiece.x + b.relX + dx);
+                let ny = Math.ceil(currentPiece.y + b.relY + dy - 0.05);
+                if (nx < 0 || nx >= CONFIG.COLS || ny >= CONFIG.ROWS) return true;
+                if (ny >= 0 && field[ny] && field[ny][nx]) return true;
+                return false;
+            });
+        }
+
+        async function ironBallAction() {
+            let activeIrons = [];
+            for (let r = 0; r < CONFIG.ROWS; r++) {
+                for (let c = 0; c < CONFIG.COLS; c++) {
+                    if (field[r][c] === CONFIG.BLOCK_TYPES.IRON) {
+                        activeIrons.push({ x: c, y: r, dir: lastMoveDir, dead: false, destroyedCount: 0, idleSteps: 0 });
+                        field[r][c] = CONFIG.BLOCK_TYPES.EMPTY;
+                    }
+                }
+            }
+            if (activeIrons.length === 0) return;
+
+            let processing = true;
+            while (processing) {
+                processing = false;
+                for (let iron of activeIrons) {
+                    if (iron.dead) continue;
+                    let curR = Math.round(iron.y), curC = Math.round(iron.x);
+
+                    if (curR + 1 < CONFIG.ROWS && field[curR + 1][curC] === CONFIG.BLOCK_TYPES.SOFT) {
+                        while (curR + 1 < CONFIG.ROWS && field[curR + 1][curC] === CONFIG.BLOCK_TYPES.SOFT) {
+                            iron.destroyedCount++; iron.idleSteps = 0;
+                            performDestruction(curC, curR + 1, iron.destroyedCount);
+                            processing = true;
+                        }
+                    }
+                    if (curR + 1 < CONFIG.ROWS && field[curR + 1][curC] === CONFIG.BLOCK_TYPES.EMPTY) {
+                        await moveIron(iron, curC, curR + 1, 1.5 * CONFIG.IRON_SPEED, activeIrons);
+                        iron.idleSteps++; processing = true; continue;
+                    }
+
+                    let nextC = curC + iron.dir;
+                    let canDestroyNext = (nextC >= 0 && nextC < CONFIG.COLS && field[curR][nextC] === 1);
+                    let canMoveNext = (nextC >= 0 && nextC < CONFIG.COLS && field[curR][nextC] === 0);
+
+                    if (canDestroyNext || canMoveNext) {
+                        if (canDestroyNext) {
+                            while (nextC >= 0 && nextC < CONFIG.COLS && field[curR][nextC] === 1) {
+                                iron.destroyedCount++; iron.idleSteps = 0;
+                                performDestruction(nextC, curR, iron.destroyedCount);
+                                processing = true;
+                            }
+                        }
+                        if (nextC >= 0 && nextC < CONFIG.COLS && field[curR][nextC] === 0) {
+                            await moveIron(iron, nextC, curR, CONFIG.IRON_SPEED, activeIrons);
+                            iron.idleSteps++; processing = true;
+                            if (iron.idleSteps > CONFIG.IDLE_LIMIT) finalizeIron(iron, Math.round(iron.x), Math.round(iron.y));
+                            continue;
+                        }
+                    }
+
+                    let oppC = curC - iron.dir;
+                    if (oppC >= 0 && oppC < CONFIG.COLS && (field[curR][oppC] === 1 || field[curR][oppC] === 0)) {
+                        iron.dir *= -1; processing = true;
+                    } else {
+                        finalizeIron(iron, curC, curR);
+                    }
+                }
+            }
+            await applyGlobalGravity();
+        }
+
+        function finalizeIron(iron, x, y) {
+            iron.dead = true;
+            createParticles(x, y, "#ff6666");
+            if (iron.destroyedCount > 0 && iron.destroyedCount > bestDestroyedRecord) {
+                bestDestroyedRecord = iron.destroyedCount;
+                document.getElementById('bestCount').innerText = bestDestroyedRecord;
+            }
+        }
+
+        function performDestruction(x, y, count) {
+            createParticles(x, y, "#aaffff");
+            field[y][x] = CONFIG.BLOCK_TYPES.EMPTY;
+            addFloatingText(x, y, count);
+            updateUI(count);
+        }
+
+        async function moveIron(iron, tx, ty, speed, irons) {
+            while (iron.x !== tx || iron.y !== ty) {
+                iron.x = iron.x < tx ? Math.min(iron.x + speed, tx) : Math.max(iron.x - speed, tx);
+                iron.y = iron.y < ty ? Math.min(iron.y + speed, ty) : Math.max(iron.y - speed, ty);
+                drawAll(irons);
+                await new Promise(r => requestAnimationFrame(r));
+            }
+        }
+
+        async function applyGlobalGravity() {
+            let moved = true;
+            while (moved) {
+                moved = false;
+                for (let r = CONFIG.ROWS - 2; r >= 0; r--) {
+                    for (let c = 0; c < CONFIG.COLS; c++) {
+                        if (field[r][c] !== 0 && field[r][c] !== 3 && field[r + 1][c] === 0) {
+                            field[r + 1][c] = field[r][c]; field[r][c] = 0; moved = true;
+                        }
+                    }
+                }
+                if (moved) { drawAll(); await new Promise(res => setTimeout(res, 40 / CONFIG.SPEED_SCALE)); }
+            }
+        }
+
+        function drawBlock(tCtx, x, y, type, size = CONFIG.SIZE) {
+            const px = x * size, py = y * size;
+            if (type === 3) {
+                const s = size * 0.75, cx = px + size / 2, cy = py + size / 2, r = s / 2;
+                const grad = tCtx.createRadialGradient(cx - r / 3, cy - r / 3, r / 10, cx, cy, r);
+                grad.addColorStop(0, '#ff3333'); grad.addColorStop(0.5, '#990000'); grad.addColorStop(1, '#330000');
+                tCtx.fillStyle = grad; tCtx.beginPath(); tCtx.arc(cx, cy, r, 0, Math.PI * 2); tCtx.fill();
+            } else if (type === 1) {
+                const s = size * 0.75, off = (size - s) / 2;
+                tCtx.fillStyle = CONFIG.COLORS.SOFT_FILL; tCtx.strokeStyle = CONFIG.COLORS.SOFT_STROKE;
+                tCtx.beginPath(); tCtx.roundRect(px + off, py + off, s, s, 5); tCtx.fill(); tCtx.stroke();
+            } else if (type === 2) {
+                let fill = CONFIG.COLORS.HARD_FILL, stroke = CONFIG.COLORS.HARD_STROKE;
+                if (flashingRows.includes(y) && flashState) { fill = '#ccc'; stroke = '#fff'; }
+                tCtx.fillStyle = stroke; tCtx.fillRect(px, py, size, size);
+                tCtx.fillStyle = fill; tCtx.fillRect(px + 2, py + 2, size - 4, size - 4);
+            }
+        }
+
+        function drawAll(activeIrons = []) {
+            ctx.globalAlpha = 1.0; ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (gameState === 'TITLE') {
+                ctx.fillStyle = "white"; ctx.textAlign = "center";
+                ctx.font = "bold 24px Arial"; ctx.fillText("IRON PUZZLE", canvas.width / 2, 180);
+                ctx.font = "16px Arial"; ctx.fillText("Tap to Start", canvas.width / 2, 240);
+                return;
+            }
+            for (let r = 0; r < CONFIG.ROWS; r++) {
+                for (let c = 0; c < CONFIG.COLS; c++) { if (field[r][c]) drawBlock(ctx, c, r, field[r][c]); }
+            }
+            activeIrons.forEach(i => { if (!i.dead) drawBlock(ctx, i.x, i.y, 3); });
+            if (currentPiece) {
+                currentPiece.blocks.forEach(b => drawBlock(ctx, currentPiece.x + b.relX, currentPiece.y + b.relY, b.type));
+            }
+            let isDangerous = field.some((row, r) => r < 6 && row.some(cell => cell !== 0));
+            ctx.setLineDash([5, 5]); ctx.lineWidth = 2;
+            if (isDangerous) { warningAnim += 0.1; ctx.strokeStyle = `rgba(255,0,0,${Math.abs(Math.sin(warningAnim))})`; }
+            else { ctx.strokeStyle = "rgba(255,255,255,0.2)"; }
+            ctx.beginPath(); ctx.moveTo(0, CONFIG.DEADLINE_Y * CONFIG.SIZE); ctx.lineTo(canvas.width, CONFIG.DEADLINE_Y * CONFIG.SIZE); ctx.stroke(); ctx.setLineDash([]);
+            particles.forEach((p, i) => {
+                ctx.globalAlpha = p.life; ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y, 3, 3);
+                p.x += p.vx; p.y += p.vy; p.life -= 0.04; if (p.life <= 0) particles.splice(i, 1);
+            });
+            ctx.font = "bold 16px Arial"; ctx.textAlign = "center"; ctx.fillStyle = "#fff";
+            floatingTexts.forEach((ft, i) => {
+                ctx.globalAlpha = ft.life; ctx.fillText(ft.text, ft.x, ft.y);
+                ft.y -= 0.3; ft.life -= 0.02; if (ft.life <= 0) floatingTexts.splice(i, 1);
+            });
+            ctx.globalAlpha = 1.0;
+            if (gameState === 'GAMEOVER') {
+                ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = "white"; ctx.textAlign = "center";
+                ctx.font = "bold 24px Arial"; ctx.fillText("GAME OVER", canvas.width / 2, 180);
+                ctx.font = "16px Arial"; ctx.fillText(`Level: ${currentLevel}`, canvas.width / 2, 220);
+                ctx.fillText("Tap to Title", canvas.width / 2, 280);
+            }
+            nctx.clearRect(0, 0, 80, 80);
+            if (nextPiece) nextPiece.blocks.forEach(b => drawBlock(nctx, b.relX + (nextPiece.isIronTurn ? 1 : 0.5), b.relY + 0.5, b.type, 22));
+        }
+
+        function createParticles(x, y, color) {
+            for (let i = 0; i < 8; i++) particles.push({ x: (x + 0.5) * CONFIG.SIZE, y: (y + 0.5) * CONFIG.SIZE, vx: (Math.random() - 0.5) * 12, vy: (Math.random() - 0.5) * 12, life: 1.0, color });
+        }
+        function addFloatingText(x, y, count) { floatingTexts.push({ x: (x + 0.5) * CONFIG.SIZE, y: y * CONFIG.SIZE, text: count, life: 1.0 }); }
+
+        function updateUI(displayCount) {
+            document.getElementById('levelVal').innerText = currentLevel;
+            document.getElementById('pCount').innerText = `Next in: ${8 - (pieceCount % 8 || 0)}`;
+            if (displayCount !== null) document.getElementById('curCount').innerText = displayCount;
+        }
+
+        async function flashLines(rows) {
+            flashingRows = rows; const duration = 250; const interval = 50; const start = Date.now();
+            while (Date.now() - start < duration) { flashState = !flashState; drawAll(); await new Promise(r => setTimeout(r, interval)); }
+            flashingRows = []; flashState = false; drawAll();
+        }
+
+        /**
+         * 消去・着地処理（バグ修正版）
+         */
+        async function settle() {
+            if (isSettling) return;
+            isSettling = true;
+            currentPiece.blocks.forEach(b => {
+                const fy = Math.round(currentPiece.y + b.relY), fx = Math.round(currentPiece.x + b.relX);
+                if (fy >= 0 && fy < CONFIG.ROWS) {
+                    field[fy][fx] = b.type;
+                    if (fy < CONFIG.DEADLINE_Y) gameState = 'GAMEOVER';
+                } else if (fy < 0) gameState = 'GAMEOVER';
+            });
+            currentPiece = null;
+
+            if (gameState === 'PLAYING') {
+                await applyGlobalGravity();
+                await ironBallAction();
+
+                // 消去すべき行のインデックスを特定
+                let linesToClear = [];
+                for (let r = 0; r < CONFIG.ROWS; r++) {
+                    if (field[r].every(v => v === CONFIG.BLOCK_TYPES.HARD)) linesToClear.push(r);
+                }
+
+                if (linesToClear.length > 0) {
+                    await flashLines(linesToClear);
+                    currentLevel += linesToClear.length;
+
+                    // 【修正ポイント】一括消去処理
+                    // 消去されない行だけを抽出し、上から空行を補充してフィールドを再構成する
+                    let newField = field.filter((_, index) => !linesToClear.includes(index));
+                    while (newField.length < CONFIG.ROWS) {
+                        newField.unshift(Array(CONFIG.COLS).fill(0));
+                    }
+                    field = newField;
+
+                    await applyGlobalGravity();
+                }
+            }
+            isSettling = false;
+            if (gameState === 'PLAYING') spawnNext();
+            else updateUI(null);
+        }
+
+        function loop() {
+            if (gameState === 'PLAYING' && !isSettling) {
+                if (!currentPiece) spawnNext();
+                else {
+                    if (!checkCollision(0, currentPiece.fallSpeed)) currentPiece.y += currentPiece.fallSpeed;
+                    else { currentPiece.y = Math.floor(currentPiece.y + 0.1); settle(); }
+                }
+            }
+            drawAll(); requestAnimationFrame(loop);
+        }
+
+        function handleStart() {
+            if (gameState === 'TITLE') { gameState = 'PLAYING'; if (!currentPiece) spawnNext(); }
+            else if (gameState === 'GAMEOVER') initGame();
+        }
+
+        canvas.addEventListener('mousedown', (e) => { e.preventDefault(); handleStart(); });
+        canvas.addEventListener('touchstart', (e) => { e.preventDefault(); handleStart(); }, { passive: false });
+
+        window.addEventListener('keydown', e => {
+            if (gameState !== 'PLAYING' || isSettling || !currentPiece) return;
+            if (e.key === 'ArrowLeft' && !checkCollision(-1, 0)) { currentPiece.x--; lastMoveDir = -1; }
+            if (e.key === 'ArrowRight' && !checkCollision(1, 0)) { currentPiece.x++; lastMoveDir = 1; }
+            if (e.key === 'ArrowDown') currentPiece.fallSpeed = CONFIG.SPEED_DOWN;
+            if (e.key === 'ArrowUp' || e.code === 'Space') {
+                if (currentPiece.isIronTurn) { currentPiece.blocks[0].type = (currentPiece.blocks[0].type === 3) ? 2 : 3; }
+                else {
+                    const rotated = currentPiece.blocks.map(b => ({ relX: -b.relY, relY: b.relX, type: b.type }));
+                    for (let ox of [0, 1, -1, 2, -2]) { if (!checkCollision(ox, 0, rotated)) { currentPiece.x += ox; currentPiece.blocks = rotated; break; } }
+                }
+            }
+        });
+        window.addEventListener('keyup', e => {
+            if (e.key === 'ArrowDown' && currentPiece) {
+                currentPiece.fallSpeed = CONFIG.SPEED_BASE_UNIT * Math.pow(1.1, currentLevel - 1) * CONFIG.SPEED_SCALE;
+            }
+        });
+
+        initGame(); loop();
+    </script>
+</body>
+
+</html>

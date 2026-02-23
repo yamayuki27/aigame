@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+	<meta charset="UTF-8">
+	<title>Surfing Proto - Deep & Slow Dry Edition</title>
+	<style>
+		body {
+			margin: 0;
+			background-color: #eee;
+			display: flex;
+			justify-content: center;
+			align-items: center;
+			height: 100vh;
+			overflow: hidden;
+			font-family: sans-serif;
+		}
+
+		#container {
+			position: relative;
+			width: 640px;
+			height: 800px;
+			background: #22aacc;
+			border: 4px solid #fff;
+			cursor: crosshair;
+			user-select: none;
+			touch-action: none;
+		}
+
+		canvas {
+			width: 100%;
+			height: 100%;
+			image-rendering: auto;
+		}
+
+		#ui-layer {
+			position: absolute;
+			top: 0;
+			left: 0;
+			width: 100%;
+			height: 100%;
+			display: flex;
+			flex-direction: column;
+			justify-content: center;
+			align-items: center;
+			transition: opacity 0.5s;
+			pointer-events: none;
+		}
+
+		h1 {
+			color: #fff;
+			text-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+			font-size: 48px;
+		}
+	</style>
+</head>
+
+<body>
+	<div id="container">
+		<canvas id="gameCanvas"></canvas>
+		<div id="ui-layer">
+			<h1>SURFING</h1>
+			<p>HOLD & SLIDE</p>
+		</div>
+	</div>
+
+	<script>
+		const canvas = document.getElementById('gameCanvas');
+		const ctx = canvas.getContext('2d');
+		const GRID_W = 160; const GRID_H = 400;
+		canvas.width = GRID_W; canvas.height = GRID_H;
+		const ASPECT_ADJUST = (GRID_H / GRID_W) / (800 / 640);
+
+		let current = new Float32Array(GRID_W * GRID_H);
+		let previous = new Float32Array(GRID_W * GRID_H);
+		let wetSand = new Float32Array(GRID_W * GRID_H);
+		let shorelineY = new Float32Array(GRID_W);
+		let particles = [];
+
+		// 砂浜の描画と浸透のオフセットを「30」で固定
+		const BEACH_OFFSET = 30;
+
+		for (let x = 0; x < GRID_W; x++) {
+			shorelineY[x] = GRID_H * 0.82 + Math.sin(x * 0.05) * 8 + Math.sin(x * 0.12) * 3;
+		}
+
+		let gameState = "TITLE";
+		let isPressing = false;
+		let mouseX = GRID_W / 2;
+		let wipeoutTimer = 0;
+
+		let surfer = {
+			x: GRID_W / 2, y: GRID_H + 40, targetY: GRID_H * 0.35,
+			floatOffset: 0, dirAngle: 0
+		};
+
+		const container = document.getElementById('container');
+		const handleInput = (pressing, e) => {
+			if (gameState === "TITLE" && pressing) {
+				gameState = "PADDLE";
+				document.getElementById('ui-layer').style.opacity = '0';
+				return;
+			}
+			if (gameState === "WIPEOUT") return;
+			isPressing = pressing;
+			if (gameState === "WAIT" && isPressing) gameState = "RIDE";
+			if (gameState === "RIDE" && !isPressing) gameState = "WAIT";
+			if (e) updateMousePos(e);
+		};
+
+		const updateMousePos = (e) => {
+			const rect = canvas.getBoundingClientRect();
+			const clientX = (e.touches && e.touches[0]) ? e.touches[0].clientX : e.clientX;
+			mouseX = (clientX - rect.left) * (GRID_W / rect.width);
+		};
+
+		container.onmousedown = (e) => handleInput(true, e);
+		window.onmouseup = () => handleInput(false);
+		container.ontouchstart = (e) => handleInput(true, e);
+		container.ontouchend = () => handleInput(false);
+		container.onmousemove = (e) => updateMousePos(e);
+		container.ontouchmove = (e) => updateMousePos(e);
+
+		function spawnSwell() {
+			if (gameState === "TITLE") return;
+			const strength = 25 + Math.random() * 20;
+			const seed = Math.random() * 1000;
+			for (let x = 0; x < GRID_W; x++) {
+				let targetY = Math.floor(5 + Math.sin(x * 0.03 + seed) * 12);
+				if (targetY >= 0 && targetY < GRID_H) previous[targetY * GRID_W + x] = strength;
+			}
+		}
+		setInterval(spawnSwell, 4000);
+
+		function getWaveHeight(x, y) {
+			const ix = Math.floor(x); const iy = Math.floor(y);
+			if (ix < 0 || ix >= GRID_W || iy < 0 || iy >= GRID_H) return 0;
+			return previous[iy * GRID_W + ix];
+		}
+
+		function createSpray(x, y, vx, vy) {
+			if (Math.random() > 0.25) return;
+			particles.push({
+				x: x, y: y,
+				vx: vx + (Math.random() - 0.5), vy: vy + (Math.random() - 0.5),
+				life: 1.0, size: 0.8 + Math.random()
+			});
+		}
+
+		function update() {
+			let next = new Float32Array(GRID_W * GRID_H);
+			for (let y = 1; y < GRID_H - 1; y++) {
+				for (let x = 1; x < GRID_W - 1; x++) {
+					const i = y * GRID_W + x;
+					let neighbors = (previous[i - GRID_W] + previous[i + GRID_W] + previous[i - 1] + previous[i + 1]) * 0.25;
+
+					let damping = 0.994;
+					const beachLimit = shorelineY[x] - BEACH_OFFSET;
+					if (y >= beachLimit) {
+						damping = 0.94;
+					}
+
+					next[i] = (neighbors * 2.0 - current[i]) * damping;
+
+					// 濡れ判定のロジック開始位置を beachLimit に完全同期
+					if (y >= beachLimit) {
+						if (next[i] > 0.05) {
+							wetSand[i] = Math.max(wetSand[i], next[i] * 10); // 浸透をさらに濃く(8 -> 10)
+						}
+					}
+					wetSand[i] *= 0.985; // 乾く速度を半分に (0.97 -> 0.985)
+				}
+			}
+			current.set(previous); previous.set(next);
+
+			particles = particles.filter(p => {
+				p.x += p.vx; p.y += p.vy; p.life -= 0.04;
+				return p.life > 0;
+			});
+
+			if (gameState === "WIPEOUT") {
+				wipeoutTimer--;
+				surfer.y += 0.5; surfer.dirAngle += 0.2;
+				if (wipeoutTimer <= 0) {
+					gameState = "PADDLE"; surfer.y = GRID_H + 20; surfer.dirAngle = 0;
+				}
+			} else if (gameState === "PADDLE") {
+				surfer.y -= 0.3; surfer.dirAngle += (0 - surfer.dirAngle) * 0.1;
+				if (surfer.y <= surfer.targetY) gameState = "WAIT";
+			} else if (gameState === "WAIT" || gameState === "RIDE") {
+				const hNose = getWaveHeight(surfer.x, surfer.y - 10);
+				const hTail = getWaveHeight(surfer.x, surfer.y + 2);
+				surfer.floatOffset = (hNose + hTail) * 0.7;
+
+				if (gameState === "WAIT") {
+					surfer.dirAngle += (0 - surfer.dirAngle) * 0.1;
+					surfer.y += (surfer.targetY - surfer.y) * 0.03;
+				} else if (gameState === "RIDE") {
+					let dx = mouseX - surfer.x;
+					surfer.x += dx * 0.04;
+					let targetRotation = Math.max(-0.6, Math.min(0.6, dx * 0.07));
+					let targetDir = Math.PI - targetRotation;
+					surfer.dirAngle += (targetDir - surfer.dirAngle) * 0.05;
+
+					if (Math.abs(dx) > 4) createSpray(surfer.x, surfer.y, -dx * 0.1, 0);
+
+					if (hTail > 1.6) {
+						surfer.y += (0.8 + (hTail - hNose) * 1.5) * Math.abs(Math.cos(surfer.dirAngle));
+						if (hTail > 8.0 && Math.abs(Math.cos(surfer.dirAngle)) < 0.2) {
+							gameState = "WIPEOUT"; wipeoutTimer = 100;
+						}
+					} else { surfer.y += (surfer.targetY - surfer.y) * 0.005; }
+
+					if (surfer.y >= shorelineY[Math.floor(surfer.x)]) {
+						gameState = "PADDLE"; surfer.y = shorelineY[Math.floor(surfer.x)] + 15;
+					}
+				}
+			}
+			draw();
+			requestAnimationFrame(update);
+		}
+
+		function drawSurfer(x, y, state) {
+			ctx.save();
+			ctx.translate(x, y);
+			ctx.scale(1, ASPECT_ADJUST);
+			const bW = 1.3, bH = 5.0, pY = bH * 0.4;
+			ctx.save();
+			ctx.rotate(surfer.dirAngle);
+			ctx.fillStyle = "#ff66aa";
+			ctx.beginPath(); ctx.ellipse(0, -pY, bW, bH, 0, 0, Math.PI * 2); ctx.fill();
+			ctx.save();
+			ctx.beginPath(); ctx.ellipse(0, -pY, bW, bH, 0, 0, Math.PI * 2); ctx.clip();
+			ctx.fillStyle = "#ffff00"; ctx.fillRect(-bW, -bH - pY, bW * 2, bH * 0.3);
+			ctx.restore();
+			ctx.restore();
+			ctx.strokeStyle = "#000"; ctx.lineWidth = 0.6; ctx.fillStyle = "#000";
+			if (state === "PADDLE" || state === "WAIT") {
+				ctx.save(); ctx.rotate(surfer.dirAngle);
+				ctx.beginPath(); ctx.moveTo(0, 0.5); ctx.lineTo(0, 2.5); ctx.stroke();
+				ctx.beginPath(); ctx.arc(0, -0.7, 1.2, 0, Math.PI * 2); ctx.fill();
+				ctx.restore();
+			} else if (state === "RIDE") {
+				const lean = (surfer.dirAngle - Math.PI) * 0.35;
+				ctx.save(); ctx.rotate(lean);
+				ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -3.5); ctx.stroke();
+				ctx.beginPath(); ctx.arc(0, -4.8, 1.2, 0, Math.PI * 2); ctx.fill();
+				ctx.beginPath(); ctx.moveTo(0, -2); ctx.lineTo(-2.2, -1.2); ctx.moveTo(0, -2); ctx.lineTo(2.2, -1.2); ctx.stroke();
+				ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-1.2, 2.2); ctx.moveTo(0, 0); ctx.lineTo(1.2, 2.2); ctx.stroke();
+				ctx.restore();
+			}
+			ctx.restore();
+		}
+
+		function draw() {
+			ctx.fillStyle = "#22b8dd"; ctx.fillRect(0, 0, GRID_W, GRID_H);
+
+			for (let x = 0; x < GRID_W; x++) {
+				const startY = Math.floor(shorelineY[x] - BEACH_OFFSET);
+				for (let y = startY; y < GRID_H; y++) {
+					let blend = Math.max(0, Math.min(1, (y - startY) / 45));
+					// 濡れの色をより濃く反映 (darkness の計算式を強化)
+					const wet = wetSand[y * GRID_W + x];
+					const darkness = Math.min(wet * 5, 50);
+
+					ctx.fillStyle = `rgb(${(240 * (1 - blend) + 250 * blend) - darkness}, ${(225 * (1 - blend) + 235 * blend) - darkness}, ${(190 * (1 - blend) + 205 * blend) - darkness})`;
+					ctx.fillRect(x, y, 1, 1);
+				}
+			}
+
+			for (let i = 0; i < GRID_W * GRID_H; i++) {
+				const val = previous[i];
+				if (val > 0.2) {
+					ctx.fillStyle = `rgba(255, 255, 255, ${Math.min(val / 4.5, 0.7)})`;
+					ctx.fillRect(i % GRID_W, Math.floor(i / GRID_W), 1.1, 1.1);
+				}
+			}
+			particles.forEach(p => {
+				ctx.fillStyle = `rgba(255, 255, 255, ${p.life * 0.7})`;
+				ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
+			});
+			if (gameState !== "TITLE") drawSurfer(surfer.x, surfer.y + surfer.floatOffset, gameState);
+		}
+		update();
+	</script>
+</body>
+
+</html>

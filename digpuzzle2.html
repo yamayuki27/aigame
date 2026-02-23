@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Iron Digger - Complete Edition</title>
+    <style>
+        :root {
+            --field-bg: #110c00;
+            --panel-bg: #222;
+        }
+
+        body {
+            background: #0a0a0a;
+            color: #eee;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            font-family: 'Segoe UI', sans-serif;
+            overflow: hidden;
+            user-select: none;
+            touch-action: none;
+        }
+
+        canvas {
+            border: 4px solid #333;
+            background: var(--field-bg);
+            box-shadow: 0 0 40px rgba(0, 0, 0, 0.9);
+            cursor: pointer;
+        }
+
+        .game-layout {
+            display: flex;
+            gap: 20px;
+        }
+
+        .side-panel {
+            background: var(--panel-bg);
+            padding: 15px;
+            border-radius: 10px;
+            width: 140px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .stat-label {
+            font-size: 10px;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .stat-value {
+            font-size: 20px;
+            font-weight: bold;
+            font-family: monospace;
+            color: #fff;
+            margin-bottom: 5px;
+        }
+
+        .combo-box {
+            color: #fff;
+            font-style: italic;
+            text-shadow: 0 0 8px rgba(255, 255, 255, 0.5);
+        }
+    </style>
+</head>
+
+<body>
+    <div class="game-layout">
+        <canvas id="gameCanvas" width="270" height="450"></canvas>
+        <div class="side-panel">
+            <div>
+                <div class="stat-label">BEST</div>
+                <div id="bestScore" class="stat-value">0</div>
+            </div>
+            <div>
+                <div class="stat-label">DESTROYED</div>
+                <div id="curCount" class="stat-value">0</div>
+            </div>
+            <div>
+                <div class="stat-label">DEPTH</div>
+                <div id="depth" class="stat-value">0m</div>
+            </div>
+            <div id="comboArea" style="visibility:hidden;">
+                <div class="stat-label">COMBO</div>
+                <div id="comboCount" class="stat-value combo-box">0</div>
+            </div>
+            <hr style="width:100%; border:0; border-top:1px solid #444;">
+            <div>
+                <div id="pCount" style="font-size: 11px; color: #5af;">Next in: 8</div>
+                <canvas id="nextCanvas" width="80" height="80"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const CONFIG = {
+            ROWS_DATA: 128, COLS: 9, SIZE: 30, ROWS_VIEW: 15,
+            SPEED_BASE_UNIT: 0.0075,
+            SPEED_DOWN: 0.1,
+            IRON_SPEED_LINEAR: 0.075, // 通常の1.5倍速
+            CAMERA_SMOOTH: 0.08,
+            NEXT_TURN_WAIT: 400,
+            MAX_BOUNCE: 3,
+            BLOCK_TYPES: { EMPTY: 0, SOFT: 1, HARD: 2, IRON: 3 },
+            COLORS: { SOFT_FILL: 'rgba(135, 206, 250, 0.6)', HARD_FILL: '#543', HARD_STROKE: '#210' }
+        };
+
+        let field, currentPiece, nextPiece, gameState, isSettling, isCameraMoving = false;
+        let totalDestroyed = 0, currentCombo = 0, pieceCount, lastMoveDir, floatingTexts = [], particles = [];
+        let viewOffsetY = 0, targetViewOffsetY = 0;
+        let flashingLines = [];
+        let scrollLostBlocks = [];
+
+        const canvas = document.getElementById('gameCanvas'), ctx = canvas.getContext('2d');
+        const nCanvas = document.getElementById('nextCanvas'), nctx = nCanvas.getContext('2d');
+
+        function initGame() {
+            field = Array.from({ length: CONFIG.ROWS_DATA }, () => Array(CONFIG.COLS).fill(0));
+            for (let r = 25; r <= 110; r++) {
+                for (let c = 0; c < CONFIG.COLS; c++) {
+                    field[r][c] = (Math.random() < 0.3) ? CONFIG.BLOCK_TYPES.HARD : CONFIG.BLOCK_TYPES.SOFT;
+                }
+            }
+            totalDestroyed = 0; pieceCount = 0; lastMoveDir = 1;
+            nextPiece = generatePieceData(0);
+            gameState = 'TITLE'; isSettling = false;
+            floatingTexts = []; particles = []; flashingLines = []; scrollLostBlocks = [];
+
+            const best = localStorage.getItem('ironDiggerBest') || 0;
+            document.getElementById('bestScore').innerText = best;
+
+            const topRow = getTopRow();
+            viewOffsetY = targetViewOffsetY = Math.max(0, topRow - 7);
+            updateUI(0);
+        }
+
+        function getTopRow() {
+            for (let r = 0; r < CONFIG.ROWS_DATA; r++) { if (field[r].some(cell => cell !== 0)) return r; }
+            return CONFIG.ROWS_DATA - 1;
+        }
+
+        function generatePieceData(spawnY) {
+            pieceCount++;
+            const isIron = pieceCount % 8 === 0;
+            const p = { x: 4, y: spawnY, blocks: [], isIronTurn: isIron, fallSpeed: CONFIG.SPEED_BASE_UNIT };
+            if (isIron) {
+                p.blocks = [{ relX: 0, relY: 0, type: CONFIG.BLOCK_TYPES.IRON }];
+            } else {
+                const shapes = [
+                    [[0, 0], [1, 0]], [[0, 0], [0, 1]],
+                    [[0, 0], [1, 0], [0, 1]], [[0, 0], [1, 0], [1, 1]],
+                    [[0, 0], [0, 1], [1, 1]]
+                ];
+                const shape = shapes[Math.floor(Math.random() * shapes.length)];
+                p.blocks = shape.map(v => ({ relX: v[0], relY: v[1], type: Math.random() < 0.3 ? 1 : 2 }));
+            }
+            return p;
+        }
+
+        async function spawnNext() {
+            if (gameState !== 'PLAYING') return;
+            const topRow = getTopRow();
+            const spawnY = Math.max(0, topRow - 7);
+            targetViewOffsetY = spawnY;
+            isCameraMoving = true;
+            // カメラ移動を待つ
+            while (Math.abs(viewOffsetY - targetViewOffsetY) > 0.05) { await new Promise(r => requestAnimationFrame(r)); }
+            isCameraMoving = false;
+            currentPiece = nextPiece;
+            currentPiece.y = spawnY;
+            nextPiece = generatePieceData(spawnY);
+            updateUI(null);
+        }
+
+        function checkCollision(dx, dy, blocks = currentPiece.blocks) {
+            if (!currentPiece) return false;
+            return blocks.some(b => {
+                let nx = Math.floor(currentPiece.x + b.relX + dx);
+                let ny = Math.ceil(currentPiece.y + b.relY + dy - 0.05);
+                if (nx < 0 || nx >= CONFIG.COLS || ny >= CONFIG.ROWS_DATA) return true;
+                if (ny >= 0 && field[ny][nx]) return true;
+                return false;
+            });
+        }
+
+        function processScrollLoss(oldY, newY) {
+            if (newY <= oldY) return;
+            // 消滅ラインを1つ上に設定
+            const triggerLine = Math.floor(newY + 1);
+            const oldTriggerLine = Math.floor(oldY + 1);
+            for (let r = oldTriggerLine; r < triggerLine; r++) {
+                if (r >= 0 && r < CONFIG.ROWS_DATA) {
+                    for (let c = 0; c < CONFIG.COLS; c++) {
+                        if (field[r][c] !== 0 && field[r][c] !== 3) {
+                            scrollLostBlocks.push({ x: c, y: r, type: field[r][c], life: 1.0 });
+                            field[r][c] = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        async function checkLineClear() {
+            let linesToClear = [];
+            for (let r = 0; r < CONFIG.ROWS_DATA; r++) {
+                // 硬い岩(2)で一行埋まっているかチェック
+                if (field[r].every(cell => cell === CONFIG.BLOCK_TYPES.HARD)) linesToClear.push(r);
+            }
+            if (linesToClear.length > 0) {
+                flashingLines = [...linesToClear];
+                await new Promise(res => setTimeout(res, 300));
+                flashingLines = [];
+                field = field.filter((_, i) => !linesToClear.includes(i));
+                while (field.length < CONFIG.ROWS_DATA) field.unshift(Array(CONFIG.COLS).fill(0));
+                await applyGlobalGravity();
+            }
+        }
+
+        async function ironBallAction() {
+            let activeIrons = [];
+            for (let r = 0; r < CONFIG.ROWS_DATA; r++) {
+                for (let c = 0; c < CONFIG.COLS; c++) {
+                    if (field[r][c] === CONFIG.BLOCK_TYPES.IRON) {
+                        activeIrons.push({ x: c, y: r, dir: lastMoveDir, dead: false, bounceCount: 0 });
+                        field[r][c] = CONFIG.BLOCK_TYPES.EMPTY;
+                    }
+                }
+            }
+            if (activeIrons.length === 0) return;
+
+            currentCombo = 0;
+            document.getElementById('comboArea').style.visibility = 'visible';
+
+            let processing = true;
+            while (processing) {
+                processing = false;
+                for (let iron of activeIrons) {
+                    if (iron.dead) continue;
+                    let curR = Math.round(iron.y), curC = Math.round(iron.x);
+
+                    if (curR + 1 < CONFIG.ROWS_DATA) {
+                        const targetDown = field[curR + 1][curC];
+                        if (targetDown === CONFIG.BLOCK_TYPES.SOFT || targetDown === CONFIG.BLOCK_TYPES.EMPTY) {
+                            if (targetDown === CONFIG.BLOCK_TYPES.SOFT) performDestruction(curC, curR + 1);
+                            await moveIron(iron, curC, curR + 1, CONFIG.IRON_SPEED_LINEAR, activeIrons);
+                            iron.bounceCount = 0;
+                            processing = true; continue;
+                        }
+                    }
+
+                    let nextC = curC + iron.dir;
+                    if (nextC >= 0 && nextC < CONFIG.COLS && (field[curR][nextC] === CONFIG.BLOCK_TYPES.SOFT || field[curR][nextC] === CONFIG.BLOCK_TYPES.EMPTY)) {
+                        if (field[curR][nextC] === CONFIG.BLOCK_TYPES.SOFT) performDestruction(nextC, curR);
+                        await moveIron(iron, nextC, curR, CONFIG.IRON_SPEED_LINEAR, activeIrons);
+                        processing = true; continue;
+                    }
+
+                    iron.dir *= -1;
+                    iron.bounceCount++;
+                    if (iron.bounceCount >= CONFIG.MAX_BOUNCE * 2) {
+                        iron.dead = true;
+                        createParticles(iron.x, iron.y, "#ff3333");
+                    } else {
+                        processing = true;
+                    }
+                }
+            }
+            await applyGlobalGravity();
+            setTimeout(() => { document.getElementById('comboArea').style.visibility = 'hidden'; }, 1000);
+        }
+
+        async function moveIron(iron, tx, ty, speed, irons) {
+            const startX = iron.x, startY = iron.y;
+            let progress = 0;
+            while (progress < 1) {
+                progress += speed;
+                if (progress > 1) progress = 1;
+                iron.x = startX + (tx - startX) * progress;
+                iron.y = startY + (ty - startY) * progress;
+                const screenMiddle = viewOffsetY + (CONFIG.ROWS_VIEW / 2);
+                if (iron.y > screenMiddle) { targetViewOffsetY = Math.min(CONFIG.ROWS_DATA - CONFIG.ROWS_VIEW, iron.y - (CONFIG.ROWS_VIEW / 2)); }
+                drawAll(irons);
+                await new Promise(r => requestAnimationFrame(r));
+            }
+        }
+
+        function performDestruction(x, y) {
+            field[y][x] = CONFIG.BLOCK_TYPES.EMPTY;
+            totalDestroyed++; currentCombo++;
+            createParticles(x, y, "#8df");
+            addFloatingText(x, y, currentCombo);
+            updateUI(totalDestroyed);
+        }
+
+        async function applyGlobalGravity() {
+            let moved = true;
+            while (moved) {
+                moved = false;
+                for (let r = CONFIG.ROWS_DATA - 2; r >= 0; r--) {
+                    for (let c = 0; c < CONFIG.COLS; c++) {
+                        if (field[r][c] !== 0 && field[r][c] !== 3 && field[r + 1][c] === 0) {
+                            field[r + 1][c] = field[r][c]; field[r][c] = 0; moved = true;
+                        }
+                    }
+                }
+                if (moved) { drawAll(); await new Promise(res => setTimeout(res, 30)); }
+            }
+        }
+
+        function drawIronBall(x, y) {
+            const px = x * CONFIG.SIZE + CONFIG.SIZE / 2, py = (y - viewOffsetY) * CONFIG.SIZE + CONFIG.SIZE / 2;
+            const r = CONFIG.SIZE * 0.38;
+            ctx.fillStyle = '#cc0000';
+            ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.beginPath(); ctx.arc(px, py + r * 0.1, r * 0.9, 0, Math.PI, false); ctx.fill();
+            ctx.fillStyle = 'white';
+            ctx.beginPath(); ctx.arc(px - r * 0.4, py - r * 0.4, r * 0.2, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = 'white'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+            ctx.beginPath(); ctx.arc(px, py, r * 0.7, -1.8, -1.0); ctx.stroke();
+        }
+
+        function drawGlassBlock(px, py) {
+            ctx.fillStyle = CONFIG.COLORS.SOFT_FILL;
+            ctx.beginPath(); ctx.roundRect(px + 2, py + 2, CONFIG.SIZE - 4, CONFIG.SIZE - 4, 2); ctx.fill();
+            ctx.strokeStyle = "rgba(255,255,255,0.7)"; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(px + 5, py + 22); ctx.lineTo(px + 22, py + 5); ctx.stroke();
+            ctx.strokeStyle = "white"; ctx.strokeRect(px + 3, py + 3, CONFIG.SIZE - 6, CONFIG.SIZE - 6);
+        }
+
+        function drawAll(activeIrons = []) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (gameState === 'TITLE') {
+                ctx.fillStyle = "white"; ctx.textAlign = "center"; ctx.font = "bold 22px Arial";
+                ctx.fillText("IRON DIGGER", canvas.width / 2, 200);
+                ctx.font = "14px Arial"; ctx.fillText("Click to Start", canvas.width / 2, 240);
+                return;
+            }
+
+            if (Math.abs(viewOffsetY - targetViewOffsetY) > 0.01) {
+                const oldVY = viewOffsetY;
+                viewOffsetY += (targetViewOffsetY - viewOffsetY) * CONFIG.CAMERA_SMOOTH;
+                processScrollLoss(oldVY, viewOffsetY);
+            }
+
+            for (let r = Math.floor(viewOffsetY); r < Math.floor(viewOffsetY) + CONFIG.ROWS_VIEW + 1; r++) {
+                if (r >= 0 && r < CONFIG.ROWS_DATA) {
+                    for (let c = 0; c < CONFIG.COLS; c++) {
+                        const type = field[r][c];
+                        const px = c * CONFIG.SIZE, py = (r - viewOffsetY) * CONFIG.SIZE;
+                        if (type === 1) drawGlassBlock(px, py);
+                        else if (type === 2) { ctx.fillStyle = CONFIG.COLORS.HARD_STROKE; ctx.fillRect(px, py, CONFIG.SIZE, CONFIG.SIZE); ctx.fillStyle = CONFIG.COLORS.HARD_FILL; ctx.fillRect(px + 2, py + 2, CONFIG.SIZE - 4, CONFIG.SIZE - 4); }
+                        if (flashingLines.includes(r)) { ctx.fillStyle = "rgba(255, 255, 255, 0.8)"; ctx.fillRect(px, py, CONFIG.SIZE, CONFIG.SIZE); }
+                    }
+                }
+            }
+            scrollLostBlocks.forEach((lb, i) => {
+                const px = lb.x * CONFIG.SIZE, py = (lb.y - viewOffsetY) * CONFIG.SIZE;
+                ctx.globalAlpha = lb.life; ctx.fillStyle = "white"; ctx.fillRect(px, py, CONFIG.SIZE, CONFIG.SIZE);
+                lb.life -= 0.05; if (lb.life <= 0) scrollLostBlocks.splice(i, 1);
+            });
+            ctx.globalAlpha = 1.0;
+            activeIrons.forEach(i => { if (!i.dead) drawIronBall(i.x, i.y); });
+            if (currentPiece && !isCameraMoving) {
+                currentPiece.blocks.forEach(b => {
+                    const px = (currentPiece.x + b.relX) * CONFIG.SIZE, py = (currentPiece.y + b.relY - viewOffsetY) * CONFIG.SIZE;
+                    if (b.type === 1) drawGlassBlock(px, py);
+                    else if (b.type === 2) { ctx.fillStyle = CONFIG.COLORS.HARD_STROKE; ctx.fillRect(px, py, CONFIG.SIZE, CONFIG.SIZE); ctx.fillStyle = CONFIG.COLORS.HARD_FILL; ctx.fillRect(px + 2, py + 2, CONFIG.SIZE - 4, CONFIG.SIZE - 4); }
+                    else if (b.type === 3) drawIronBall(currentPiece.x + b.relX, currentPiece.y + b.relY);
+                });
+            }
+            particles.forEach((p, i) => {
+                ctx.globalAlpha = p.life; ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y - viewOffsetY * CONFIG.SIZE, 3, 3);
+                p.x += p.vx; p.y += p.vy; p.life -= 0.05; if (p.life <= 0) particles.splice(i, 1);
+            });
+            floatingTexts.forEach((ft, i) => {
+                ctx.globalAlpha = ft.life; ctx.fillStyle = "#ffffff"; ctx.font = "bold 18px Arial"; ctx.textAlign = "center";
+                ctx.fillText(ft.text + "!", ft.x, (ft.y - viewOffsetY * CONFIG.SIZE));
+                ft.y -= 0.5; ft.life -= 0.02; if (ft.life <= 0) floatingTexts.splice(i, 1);
+            });
+            ctx.globalAlpha = 1.0;
+            updateDepthUI();
+        }
+
+        function createParticles(x, y, color) {
+            for (let i = 0; i < 12; i++) {
+                particles.push({ x: (x + 0.5) * CONFIG.SIZE, y: (y + 0.5) * CONFIG.SIZE, vx: (Math.random() - 0.5) * 8, vy: (Math.random() - 0.5) * 8, life: 1.0, color: color });
+            }
+        }
+        function addFloatingText(x, y, combo) { floatingTexts.push({ x: (x + 0.5) * CONFIG.SIZE, y: y * CONFIG.SIZE, text: combo, life: 1.0 }); }
+
+        function updateUI(destroyed) {
+            document.getElementById('pCount').innerText = `Next in: ${8 - (pieceCount % 8 || 0)}`;
+            if (destroyed !== null) {
+                document.getElementById('curCount').innerText = destroyed;
+                const best = Math.max(destroyed, localStorage.getItem('ironDiggerBest') || 0);
+                localStorage.setItem('ironDiggerBest', best);
+                document.getElementById('bestScore').innerText = best;
+            }
+            document.getElementById('comboCount').innerText = currentCombo;
+        }
+
+        function updateDepthUI() {
+            const currentDepth = Math.max(0, Math.floor(viewOffsetY + 5));
+            document.getElementById('depth').innerText = currentDepth + "m";
+        }
+
+        async function settle() {
+            if (isSettling) return;
+            isSettling = true;
+            currentPiece.blocks.forEach(b => {
+                const fy = Math.round(currentPiece.y + b.relY), fx = Math.round(currentPiece.x + b.relX);
+                if (fy >= 0 && fy < CONFIG.ROWS_DATA) field[fy][fx] = b.type;
+            });
+            currentPiece = null;
+            if (gameState === 'PLAYING') {
+                await applyGlobalGravity();
+                await ironBallAction();
+                await checkLineClear(); // ライン消えをチェック
+            }
+            setTimeout(() => { isSettling = false; if (gameState === 'PLAYING') spawnNext(); }, CONFIG.NEXT_TURN_WAIT);
+        }
+
+        function loop() {
+            if (gameState === 'PLAYING' && !isSettling && !isCameraMoving) {
+                if (!currentPiece) spawnNext();
+                else {
+                    if (currentPiece.y - viewOffsetY > 10) { targetViewOffsetY = Math.min(CONFIG.ROWS_DATA - CONFIG.ROWS_VIEW, currentPiece.y - 10); }
+                    if (!checkCollision(0, currentPiece.fallSpeed)) currentPiece.y += currentPiece.fallSpeed;
+                    else { currentPiece.y = Math.floor(currentPiece.y + 0.1); settle(); }
+                }
+            }
+            drawAll(); requestAnimationFrame(loop);
+            nctx.clearRect(0, 0, 80, 80);
+            if (nextPiece) nextPiece.blocks.forEach(b => {
+                const px = (b.relX + 1) * 20, py = (b.relY + 0.5) * 20;
+                if (b.type === 1) { nctx.fillStyle = "#8df"; nctx.fillRect(px, py, 18, 18); }
+                else if (b.type === 2) { nctx.fillStyle = CONFIG.COLORS.HARD_FILL; nctx.fillRect(px, py, 18, 18); }
+                else if (b.type === 3) { nctx.fillStyle = '#c00'; nctx.beginPath(); nctx.arc(px + 9, py + 9, 7, 0, Math.PI * 2); nctx.fill(); nctx.fillStyle = 'white'; nctx.beginPath(); nctx.arc(px + 6, py + 6, 2, 0, Math.PI * 2); nctx.fill(); }
+            });
+        }
+
+        canvas.addEventListener('mousedown', () => { if (gameState === 'TITLE') { initGame(); gameState = 'PLAYING'; spawnNext(); } });
+        window.addEventListener('keydown', e => {
+            if (gameState !== 'PLAYING' || isSettling || !currentPiece || isCameraMoving) return;
+            if (e.key === 'ArrowLeft' && !checkCollision(-1, 0)) { currentPiece.x--; lastMoveDir = -1; }
+            if (e.key === 'ArrowRight' && !checkCollision(1, 0)) { currentPiece.x++; lastMoveDir = 1; }
+            if (e.key === 'ArrowDown') currentPiece.fallSpeed = CONFIG.SPEED_DOWN;
+            if (e.key === 'ArrowUp' || e.code === 'Space') {
+                if (currentPiece.isIronTurn) currentPiece.blocks[0].type = (currentPiece.blocks[0].type === 3) ? 2 : 3;
+                else {
+                    const rotated = currentPiece.blocks.map(b => ({ relX: -b.relY, relY: b.relX, type: b.type }));
+                    for (let ox of [0, 1, -1, 2, -2]) { if (!checkCollision(ox, 0, rotated)) { currentPiece.x += ox; currentPiece.blocks = rotated; break; } }
+                }
+            }
+        });
+
+        initGame(); loop();
+    </script>
+</body>
+
+</html>

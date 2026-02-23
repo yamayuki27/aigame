@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Hybrid Ikaruga - Complete Edition</title>
+    <style>
+        body {
+            margin: 0;
+            background: #000;
+            color: white;
+            overflow: hidden;
+            font-family: 'Courier New', monospace;
+        }
+
+        canvas {
+            display: block;
+            margin: 0 auto;
+            background: #050510;
+            border: 2px solid #333;
+        }
+
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            pointer-events: none;
+            z-index: 5;
+        }
+
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 10;
+        }
+
+        .btn {
+            padding: 15px 30px;
+            background: #222;
+            border: 2px solid #fff;
+            color: white;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        #warning {
+            position: absolute;
+            top: 40%;
+            width: 100%;
+            text-align: center;
+            color: #ff0044;
+            font-size: 3em;
+            font-weight: bold;
+            display: none;
+            text-shadow: 0 0 10px #f00;
+            z-index: 8;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        <div>HI-SCORE: <span id="hiScore">0</span> | SCORE: <span id="score">0</span></div>
+        <div>LIVES: <span id="lives">★★★★★</span></div>
+        <div style="width: 200px; height: 10px; border: 1px solid #fff; margin-top: 5px; background: #111;">
+            <div id="energyBar" style="width: 0%; height: 100%; background: #0af;"></div>
+        </div>
+        <div id="comboInfo" style="color: #ff0; font-size: 14px; height: 20px;"></div>
+    </div>
+
+    <div id="warning">WARNING!! BOSS APPROACHING</div>
+
+    <div id="overlay">
+        <h1 id="titleText">HYBRID IKARUGA</h1>
+        <div id="finalScore" style="margin-bottom: 20px;"></div>
+        <div class="btn" onclick="startGame()">MISSION START</div>
+        <div style="font-size: 12px; color: #888; margin-top: 20px;">Hold [Z/X] to Auto-Fire | [C]: Special | Arrows:
+            Move</div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = 480;
+        canvas.height = 640;
+
+        const POLARITY = { WHITE: 'white', BLACK: 'black' };
+        const COLORS = { WHITE: '#E0F0FF', BLACK: '#FF3300', WHITE_AURA: 'rgba(0, 200, 255, 0.2)', BLACK_AURA: 'rgba(255, 50, 0, 0.2)' };
+
+        // ゲームステート管理
+        let score = 0, hiScore = parseInt(localStorage.getItem('ikaruga_hiscore')) || 0, lives = 5, energyGauge = 0;
+        let frameCount = 0, comboCount = 0, lastKilledPol = null, gameState = 'title';
+        let player = null, boss = null;
+        let bullets = [], enemyBullets = [], turrets = [], enemies = [], lasers = [], effects = [];
+
+        const keys = {};
+        const keyTimers = { z: 0, x: 0 };
+
+        // --- クラス定義 ---
+
+        class Particle {
+            constructor(x, y, color, speed = 6) {
+                this.x = x; this.y = y;
+                this.vx = (Math.random() - 0.5) * speed; this.vy = (Math.random() - 0.5) * speed;
+                this.life = 25; this.color = color;
+            }
+            update() { this.x += this.vx; this.y += this.vy; this.life--; }
+            draw() { ctx.globalAlpha = this.life / 25; ctx.fillStyle = this.color; ctx.fillRect(this.x, this.y, 3, 3); ctx.globalAlpha = 1.0; }
+        }
+
+        class HomingLaser {
+            constructor(x, y, target) { this.x = x; this.y = y; this.target = target; this.life = 60; }
+            update() {
+                if (this.target && this.target.hp > 0) {
+                    const dx = this.target.x - this.x, dy = this.target.y - this.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    this.x += (dx / dist) * 16; this.y += (dy / dist) * 16;
+                    if (dist < 20) { this.target.hp -= 3; return false; }
+                } else { this.y -= 16; }
+                return --this.life > 0;
+            }
+            draw() { ctx.strokeStyle = "#0ff"; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(this.x, this.y); ctx.lineTo(this.x, this.y + 10); ctx.stroke(); }
+        }
+
+        class Boss {
+            constructor() {
+                this.x = canvas.width / 2; this.y = -200; this.targetY = 120;
+                this.parts = [
+                    { id: 'leftArm', ox: -100, oy: 40, hp: 50, pol: POLARITY.BLACK, size: 60 },
+                    { id: 'rightArm', ox: 100, oy: 40, hp: 50, pol: POLARITY.WHITE, size: 60 },
+                    { id: 'core', ox: 0, oy: 0, hp: 64, pol: POLARITY.WHITE, size: 80, active: false }
+                ];
+                this.timer = 0; this.laserCycle = 0;
+            }
+            update() {
+                this.timer++;
+                if (this.y < this.targetY) this.y += 2;
+
+                const armsDestroyed = this.parts[0].hp <= 0 && this.parts[1].hp <= 0;
+                if (armsDestroyed && !this.parts[2].active) {
+                    this.parts[2].active = true;
+                    for (let i = 0; i < 30; i++) effects.push(new Particle(this.x, this.y, "#fff", 12));
+                }
+
+                this.parts.forEach(p => {
+                    if (p.hp <= 0) return;
+                    p.x = this.x + p.ox; p.y = this.y + p.oy;
+                    if (p.id !== 'core' || p.active) {
+                        if (this.timer % 60 === 0) {
+                            for (let i = 0; i < 10; i++) {
+                                const a = (i * Math.PI * 2) / 10 + (this.timer * 0.05);
+                                enemyBullets.push({ x: p.x, y: p.y, vx: Math.cos(a) * 2.5, vy: Math.sin(a) * 2.5, polarity: p.pol });
+                            }
+                        }
+                        if (p.id === 'core' && this.timer % 100 === 0) {
+                            this.laserCycle++;
+                            p.pol = (this.laserCycle % 2 === 0) ? POLARITY.WHITE : POLARITY.BLACK;
+                            const angle = Math.atan2(player.y - p.y, player.x - p.x);
+                            enemyBullets.push({ x: p.x, y: p.y, vx: Math.cos(angle) * 5, vy: Math.sin(angle) * 5, polarity: p.pol, size: 15 });
+                        }
+                    }
+                });
+
+                if (this.parts[2].hp <= 0 && gameState !== 'clear') {
+                    gameState = 'clear';
+                    setTimeout(() => { document.getElementById('titleText').innerText = "MISSION COMPLETE"; gameOver(); }, 3000);
+                }
+            }
+            draw() {
+                this.parts.forEach(p => {
+                    if (p.hp <= 0) return;
+                    ctx.globalAlpha = (p.id === 'core' && !p.active) ? 0.1 : 1.0;
+                    ctx.fillStyle = p.pol === POLARITY.WHITE ? COLORS.WHITE : COLORS.BLACK;
+                    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+                    ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.strokeRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+                    ctx.globalAlpha = 1.0;
+                });
+            }
+        }
+
+        class AirEnemy {
+            constructor(x, pol) {
+                this.x = x; this.y = -50; this.polarity = pol; this.hp = 1;
+                this.angle = Math.PI / 2; this.speed = 4.5;
+                this.turnDir = x < 240 ? -0.04 : 0.04;
+                this.phase = 'descend'; this.hasFired = false;
+            }
+            update() {
+                if (this.phase === 'descend') {
+                    this.y += this.speed;
+                    if (this.y > 180) this.phase = 'turn';
+                } else if (this.phase === 'turn') {
+                    this.angle += this.turnDir;
+                    this.x += Math.cos(this.angle) * this.speed;
+                    this.y += Math.sin(this.angle) * this.speed;
+                    if (!this.hasFired) {
+                        const a = Math.atan2(player.y - this.y, player.x - this.x);
+                        enemyBullets.push({ x: this.x, y: this.y, vx: Math.cos(a) * 3, vy: Math.sin(a) * 3, polarity: this.polarity });
+                        this.hasFired = true;
+                    }
+                    if (Math.abs(this.angle) > Math.PI * 1.2) this.phase = 'leave';
+                } else {
+                    this.x += Math.cos(this.angle) * (this.speed + 1);
+                    this.y += Math.sin(this.angle) * (this.speed + 1);
+                }
+                return this.y > 700 || this.y < -120 || this.x < -120 || this.x > 600;
+            }
+            draw() {
+                ctx.save(); ctx.translate(this.x, this.y); ctx.rotate(this.angle - Math.PI / 2);
+                ctx.fillStyle = this.polarity === POLARITY.WHITE ? COLORS.WHITE : COLORS.BLACK;
+                ctx.beginPath(); ctx.moveTo(0, 15); ctx.lineTo(-12, -10); ctx.lineTo(12, -10); ctx.fill();
+                ctx.strokeStyle = "#fff"; ctx.stroke(); ctx.restore();
+            }
+        }
+
+        class GroundTurret {
+            constructor(x, pol, hp = 1, type = 'turret') {
+                this.x = x; this.y = -40; this.polarity = pol; this.hp = hp; this.type = type;
+                this.angle = 0;
+            }
+            update() {
+                this.y += 0.5;
+                if (this.type === 'spiral') {
+                    this.angle += 0.08;
+                    if (frameCount % 15 === 0) {
+                        enemyBullets.push({ x: this.x, y: this.y, vx: Math.cos(this.angle) * 2, vy: Math.sin(this.angle) * 2, polarity: this.polarity });
+                    }
+                } else {
+                    if (frameCount % 180 === 0) {
+                        const a = Math.round(Math.atan2(player.y - this.y, player.x - this.x) / (Math.PI / 8)) * (Math.PI / 8);
+                        enemyBullets.push({ x: this.x, y: this.y, vx: Math.cos(a) * 2.2, vy: Math.sin(a) * 2.2, polarity: this.polarity });
+                    }
+                }
+                return this.y > 700;
+            }
+            draw() {
+                ctx.save(); ctx.translate(this.x, this.y);
+                if (this.type === 'spiral') ctx.rotate(this.angle);
+                ctx.fillStyle = this.polarity === POLARITY.WHITE ? COLORS.WHITE : COLORS.BLACK;
+                const s = this.type === 'spiral' ? 42 : 26;
+                ctx.fillRect(-s / 2, -s / 2, s, s);
+                ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.strokeRect(-s / 2, -s / 2, s, s);
+                if (this.type === 'spiral') {
+                    ctx.beginPath(); ctx.moveTo(-s / 2, 0); ctx.lineTo(s / 2, 0); ctx.moveTo(0, -s / 2); ctx.lineTo(0, s / 2); ctx.stroke();
+                }
+                ctx.restore();
+            }
+        }
+
+        // --- ゲームロジック ---
+
+        function startGame() {
+            score = 0; lives = 5; energyGauge = 0; frameCount = 0; comboCount = 0; boss = null;
+            bullets = []; enemyBullets = []; turrets = []; enemies = []; lasers = []; effects = [];
+            player = { x: 240, y: 540, targetY: 540, speed: 5, polarity: POLARITY.WHITE, isAlive: true, isRespawning: false, respawnTimer: 0 };
+            gameState = 'playing';
+            document.getElementById('overlay').style.display = 'none';
+            document.getElementById('warning').style.display = 'none';
+        }
+
+        function gameOver() {
+            gameState = 'gameover';
+            score = Math.floor(score);
+            if (score > hiScore) { hiScore = score; localStorage.setItem('ikaruga_hiscore', hiScore); }
+            document.getElementById('overlay').style.display = 'flex';
+            document.getElementById('finalScore').innerText = "FINAL SCORE: " + score;
+        }
+
+        function fireShot(pol) {
+            player.polarity = pol;
+            if (bullets.length < 16) {
+                bullets.push({ x: player.x - 12, y: player.y, vy: -12, polarity: pol });
+                bullets.push({ x: player.x + 12, y: player.y, vy: -12, polarity: pol });
+            }
+        }
+
+        function update() {
+            if (gameState !== 'playing' && gameState !== 'clear') return;
+            frameCount++;
+
+            // 入力更新
+            if (keys['z'] || keys['Z']) {
+                keyTimers.z++; if (keyTimers.z === 1 || (keyTimers.z > 30 && frameCount % 8 === 0)) fireShot(POLARITY.BLACK);
+            } else keyTimers.z = 0;
+            if (keys['x'] || keys['X']) {
+                keyTimers.x++; if (keyTimers.x === 1 || (keyTimers.x > 30 && frameCount % 8 === 0)) fireShot(POLARITY.WHITE);
+            } else keyTimers.x = 0;
+
+            // レベル進行
+            if (frameCount === 120 * 60 - 180) document.getElementById('warning').style.display = 'block';
+            if (frameCount === 120 * 60) { document.getElementById('warning').style.display = 'none'; boss = new Boss(); }
+
+            if (player.isAlive) {
+                if (keys['ArrowUp'] && player.y > 50) player.y -= player.speed;
+                if (keys['ArrowDown'] && player.y < 600) player.y += player.speed;
+                if (keys['ArrowLeft'] && player.x > 30) player.x -= player.speed;
+                if (keys['ArrowRight'] && player.x < 450) player.x += player.speed;
+            } else if (player.isRespawning) {
+                player.respawnTimer--; player.y -= (player.y - player.targetY) * 0.05;
+                if (player.respawnTimer <= 0) { player.isAlive = true; player.isRespawning = false; }
+            }
+
+            // 敵生成（2分経過まで）
+            if (!boss) {
+                if (frameCount % 200 === 0) turrets.push(new GroundTurret(Math.random() * 400 + 40, Math.random() > 0.5 ? POLARITY.WHITE : POLARITY.BLACK));
+                if (frameCount % 300 === 0) {
+                    const x = Math.random() * 300 + 90;
+                    const pol = Math.random() > 0.5 ? POLARITY.WHITE : POLARITY.BLACK;
+                    for (let i = 0; i < 3; i++) setTimeout(() => enemies.push(new AirEnemy(x, pol)), i * 400);
+                }
+                if (frameCount % 850 === 0) turrets.push(new GroundTurret(Math.random() * 300 + 90, Math.random() > 0.5 ? POLARITY.WHITE : POLARITY.BLACK, 5, 'spiral'));
+            } else boss.update();
+
+            // 衝突判定
+            const bossParts = boss ? boss.parts.filter(p => p.hp > 0 && (p.id !== 'core' || p.active)) : [];
+            const allTargets = [...turrets, ...enemies, ...bossParts];
+
+            bullets = bullets.filter(b => {
+                b.y += b.vy; let hit = false;
+                allTargets.forEach(e => {
+                    if (!hit && Math.abs(e.x - b.x) < 40 && Math.abs(e.y - b.y) < 40) {
+                        if (e.polarity === b.polarity) { hit = true; effects.push(new Particle(b.x, b.y, "#fff", 2)); }
+                        else { e.hp--; hit = true; effects.push(new Particle(b.x, b.y, "#f00", 3)); }
+                    }
+                });
+                return !hit && b.y > -20;
+            });
+
+            lasers = lasers.filter(l => l.update());
+            const enemyCleanup = (e) => {
+                if (e.hp <= 0) {
+                    score = Math.floor(score + 100 * Math.pow(1.1, comboCount)); comboCount++;
+                    for (let i = 0; i < 15; i++) effects.push(new Particle(e.x, e.y, e.polarity === POLARITY.WHITE ? "#fff" : "#f30"));
+                    return false;
+                }
+                return !e.update();
+            };
+            turrets = turrets.filter(enemyCleanup);
+            enemies = enemies.filter(enemyCleanup);
+
+            enemyBullets = enemyBullets.filter(eb => {
+                eb.x += eb.vx; eb.y += eb.vy;
+                const d = Math.sqrt((eb.x - player.x) ** 2 + (eb.y - player.y) ** 2);
+                if (d < 15 && player.isAlive && !player.isRespawning) {
+                    if (eb.polarity === player.polarity) { energyGauge = Math.min(100, energyGauge + 8); return false; }
+                    else {
+                        player.isAlive = false; player.isRespawning = true; player.respawnTimer = 120; player.y = 700;
+                        lives--; comboCount = 0; if (lives <= 0) gameOver(); return false;
+                    }
+                }
+                return eb.y < 680 && eb.y > -40 && eb.x > -40 && eb.x < 520;
+            });
+
+            effects.forEach(f => f.update());
+            effects = effects.filter(f => f.life > 0);
+
+            // UI更新
+            document.getElementById('score').innerText = score;
+            document.getElementById('hiScore').innerText = hiScore;
+            document.getElementById('lives').innerText = "★".repeat(Math.max(0, lives));
+            document.getElementById('energyBar').style.width = energyGauge + "%";
+            document.getElementById('comboInfo').innerText = comboCount > 1 ? comboCount + " COMBO!" : "";
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, 480, 640);
+            // 背景グリッド
+            ctx.strokeStyle = "#1a1a3a";
+            for (let i = 0; i < 680; i += 40) { ctx.beginPath(); ctx.moveTo(0, i + (frameCount * 0.5) % 40); ctx.lineTo(480, i + (frameCount * 0.5) % 40); ctx.stroke(); }
+
+            if (boss) boss.draw();
+            turrets.forEach(t => t.draw());
+            enemies.forEach(e => e.draw());
+
+            if (player && (player.isAlive || player.isRespawning)) {
+                ctx.beginPath(); ctx.arc(player.x, player.y, 22, 0, Math.PI * 2);
+                ctx.fillStyle = player.polarity === POLARITY.WHITE ? COLORS.WHITE_AURA : COLORS.BLACK_AURA; ctx.fill();
+                ctx.fillStyle = player.polarity === POLARITY.WHITE ? COLORS.WHITE : COLORS.BLACK;
+                ctx.beginPath(); ctx.moveTo(player.x, player.y - 12); ctx.lineTo(player.x - 14, player.y + 12); ctx.lineTo(player.x + 14, player.y + 12); ctx.fill();
+                ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke();
+            }
+
+            bullets.forEach(b => { ctx.fillStyle = b.polarity === POLARITY.WHITE ? "#0ff" : "#f50"; ctx.fillRect(b.x - 2, b.y, 4, 18); });
+            enemyBullets.forEach(eb => {
+                ctx.fillStyle = eb.polarity === POLARITY.WHITE ? COLORS.WHITE : COLORS.BLACK;
+                ctx.beginPath(); ctx.arc(eb.x, eb.y, eb.size || 5, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = "#fff"; ctx.lineWidth = 1; ctx.stroke();
+            });
+            lasers.forEach(l => l.draw());
+            effects.forEach(f => f.draw());
+        }
+
+        window.addEventListener('keydown', e => {
+            keys[e.key] = true;
+            if (e.key.toLowerCase() === 'c') {
+                const t = [...turrets, ...enemies, ...(boss ? boss.parts.filter(p => p.hp > 0 && p.id !== 'core') : [])];
+                if (energyGauge >= 20 && t.length > 0) {
+                    for (let i = 0; i < 15; i++) lasers.push(new HomingLaser(player.x, player.y, t[i % t.length]));
+                    energyGauge = 0;
+                }
+            }
+        });
+        window.addEventListener('keyup', e => keys[e.key] = false);
+
+        function loop() { update(); draw(); requestAnimationFrame(loop); }
+        loop();
+    </script>
+</body>
+
+</html>
