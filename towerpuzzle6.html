@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>3D Tower Builder - Stable Version</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #000;
+            font-family: monospace;
+            touch-action: none;
+            user-select: none;
+        }
+
+        #ui {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            pointer-events: none;
+            text-align: right;
+            z-index: 10;
+        }
+
+        .stat {
+            color: #fff;
+            font-size: 24px;
+            font-weight: bold;
+        }
+
+        #msg {
+            position: absolute;
+            width: 100%;
+            text-align: center;
+            top: 50%;
+            color: #fff;
+            font-size: 1.5em;
+            pointer-events: none;
+            z-index: 10;
+            font-weight: bold;
+        }
+
+        #combo {
+            position: absolute;
+            width: 100%;
+            text-align: center;
+            top: 40%;
+            color: #ffcc00;
+            font-size: 3.5em;
+            font-weight: bold;
+            text-shadow: 0 0 15px rgba(255, 204, 0, 0.9);
+            pointer-events: none;
+            z-index: 20;
+            display: none;
+            transition: opacity 0.5s;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        <div id="floorDisplay" class="stat">1F</div>
+    </div>
+    <div id="msg">SWIPE LEFT/RIGHT TO ROTATE<br>SWIPE DOWN TO DROP</div>
+    <div id="combo">2 COMBO!</div>
+
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        const CONFIG = {
+            W: 2, D: 2, H: 128,
+            SPEED_BASE: 0.0075,
+            SPEED_DOWN: 0.2,
+            CAMERA_ROT_SPEED: 0.0025,
+            COLORS: { NORMAL: 0x3498db, SOLID: 0xffffff, AXIS: 0x00ffcc, STACKED: 0x2980b9 }
+        };
+
+        let scene, camera, renderer, field = [];
+        let gameState = 'TITLE';
+        let floorHeight = 0, cameraAngle = 0, currentPiece = null, isProcessing = false;
+        let startX = 0, startY = 0, isSwiping = false;
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x050505);
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+            scene.add(new THREE.AmbientLight(0xffffff, 0.9));
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+            dirLight.position.set(5, 15, 5);
+            scene.add(dirLight);
+            const axis = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, CONFIG.H, 8), new THREE.MeshBasicMaterial({ color: CONFIG.COLORS.AXIS, transparent: true, opacity: 0.3 }));
+            axis.position.set(0, CONFIG.H / 2 - 0.5, 0);
+            scene.add(axis);
+            for (let y = 0; y < CONFIG.H; y++) field[y] = Array.from({ length: CONFIG.W }, () => Array(CONFIG.D).fill(null));
+            for (let x = 0; x < CONFIG.W; x++) for (let z = 0; z < CONFIG.D; z++) addBlockToField(x, 0, z, true);
+            animate();
+        }
+
+        function addBlockToField(x, y, z, isSolid = false) {
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.96, 0.96), new THREE.MeshPhongMaterial({ color: isSolid ? CONFIG.COLORS.SOLID : CONFIG.COLORS.STACKED }));
+            mesh.position.set(x - 0.5, y, z - 0.5);
+            scene.add(mesh);
+            field[y][x][z] = mesh;
+            mesh.userData.isSolid = isSolid;
+        }
+
+        function spawnPiece() {
+            if (isProcessing || gameState === 'GAMEOVER') return;
+            let blocks = [];
+            let valid = false;
+            while (!valid) {
+                blocks = [];
+                const candidates = [];
+                for (let ry = 0; ry < 2; ry++) for (let rx = 0; rx < 2; rx++) for (let rz = 0; rz < 2; rz++) candidates.push({ rx, ry, rz });
+                let count = Math.random() < 0.25 ? 1 : (Math.random() < 0.50 ? 4 : Math.floor(Math.random() * 2) + 2);
+                for (let i = 0; i < count; i++) blocks.push(candidates.splice(Math.floor(Math.random() * candidates.length), 1)[0]);
+                if (blocks.length > 1) {
+                    const visited = new Set();
+                    const queue = [blocks[0]];
+                    visited.add(0);
+                    let connectedCount = 1;
+                    while (queue.length > 0) {
+                        const b = queue.shift();
+                        blocks.forEach((other, idx) => {
+                            if (!visited.has(idx)) {
+                                if (Math.abs(b.rx - other.rx) + Math.abs(b.ry - other.ry) + Math.abs(b.rz - other.rz) === 1) { visited.add(idx); queue.push(other); connectedCount++; }
+                            }
+                        });
+                    }
+                    if (connectedCount !== blocks.length) continue;
+                }
+                if (blocks.filter(b => b.ry === 0).length >= 4 || blocks.filter(b => b.ry === 1).length >= 4) continue;
+                valid = true;
+            }
+            const p = { pos: { x: 0, y: Math.max(floorHeight + 8, 10), z: 0 }, blocks: blocks, meshes: [], fallSpeed: CONFIG.SPEED_BASE };
+            if (checkCollision(0, 0, 0, p.blocks, p.pos)) {
+                gameState = 'GAMEOVER';
+                document.getElementById('msg').innerText = "GAME OVER";
+                document.getElementById('msg').style.display = 'block';
+                return;
+            }
+            p.blocks.forEach(() => {
+                const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.96, 0.96), new THREE.MeshPhongMaterial({ color: CONFIG.COLORS.NORMAL }));
+                scene.add(mesh);
+                p.meshes.push(mesh);
+            });
+            currentPiece = p;
+        }
+
+        async function processGameLogic() {
+            isProcessing = true;
+            let comboCount = 0;
+            let continuing = true;
+            while (continuing) {
+                let clearedY = [];
+                for (let y = floorHeight + 2; y < CONFIG.H; y++) {
+                    if (field[y][0][0] && field[y][1][0] && field[y][1][1] && field[y][0][1]) {
+                        if (!field[y][0][0].userData.isSolid) clearedY.push(y);
+                    }
+                }
+                if (clearedY.length > 0) {
+                    comboCount++;
+                    showCombo(comboCount);
+                    clearedY.forEach(y => { for (let x = 0; x < 2; x++) for (let z = 0; z < 2; z++) field[y][x][z].material.color.set(CONFIG.COLORS.SOLID); });
+                    await new Promise(r => setTimeout(r, 200));
+                    clearedY.forEach(y => {
+                        for (let x = 0; x < 2; x++) for (let z = 0; z < 2; z++) { scene.remove(field[y][x][z]); field[y][x][z] = null; }
+                    });
+                    let moved = true;
+                    while (moved) {
+                        moved = false;
+                        for (let y = 1; y < CONFIG.H; y++) {
+                            for (let x = 0; x < 2; x++) for (let z = 0; z < 2; z++) {
+                                if (field[y][x][z] && !field[y][x][z].userData.isSolid && !field[y - 1][x][z]) {
+                                    field[y - 1][x][z] = field[y][x][z]; field[y][x][z] = null;
+                                    field[y - 1][x][z].position.y = y - 1; moved = true;
+                                }
+                            }
+                        }
+                        if (moved) await new Promise(r => setTimeout(r, 50));
+                    }
+                } else continuing = false;
+            }
+            updateFoundationComplex();
+            isProcessing = false;
+        }
+
+        function updateFoundationComplex() {
+            let fullLines = [];
+            for (let y = floorHeight + 1; y < CONFIG.H; y++) {
+                const isFull = field[y][0][0] && field[y][1][0] && field[y][1][1] && field[y][0][1];
+                const hasBlocks = field[y][0][0] || field[y][1][0] || field[y][1][1] || field[y][0][1];
+                if (isFull) fullLines.push(y); else if (hasBlocks) fullLines.push(-1); else break;
+            }
+            let comboFoundation = 0;
+            for (let y of fullLines) { if (y === -1) break; comboFoundation++; }
+            if (comboFoundation >= 2) {
+                for (let i = 0; i < comboFoundation; i++) {
+                    let targetY = fullLines[i];
+                    for (let x = 0; x < 2; x++) for (let z = 0; z < 2; z++) {
+                        field[targetY][x][z].material.color.set(CONFIG.COLORS.SOLID);
+                        field[targetY][x][z].userData.isSolid = true;
+                    }
+                    floorHeight = targetY;
+                }
+            } else if (comboFoundation === 1) {
+                let targetY = fullLines[0];
+                if (field[targetY - 1][0][0]?.userData.isSolid) {
+                    for (let x = 0; x < 2; x++) for (let z = 0; z < 2; z++) {
+                        field[targetY][x][z].material.color.set(CONFIG.COLORS.SOLID);
+                        field[targetY][x][z].userData.isSolid = true;
+                    }
+                    floorHeight = targetY;
+                }
+            }
+            document.getElementById('floorDisplay').innerText = (floorHeight + 1) + "F";
+        }
+
+        function rotatePiece(direction = 1) {
+            if (!currentPiece || isProcessing || gameState === 'GAMEOVER') return;
+            const nextBlocks = currentPiece.blocks.map(b => {
+                let nx, nz;
+                if (direction === 1) { nx = b.rz; nz = 1 - b.rx; }
+                else { nx = 1 - b.rz; nz = b.rx; }
+                return { rx: nx, ry: b.ry, rz: nz };
+            });
+            if (!checkCollision(0, 0, 0, nextBlocks)) currentPiece.blocks = nextBlocks;
+        }
+
+        function checkCollision(dx, dy, dz, nextBlocks = null, customPos = null) {
+            const p = customPos || currentPiece.pos;
+            const blocks = nextBlocks || currentPiece.blocks;
+            for (let b of blocks) {
+                let nx = (p.x + b.rx + dx) % CONFIG.W;
+                let nz = (p.z + b.rz + dz) % CONFIG.D;
+                if (nx < 0) nx += CONFIG.W; if (nz < 0) nz += CONFIG.D;
+                let ny_check = Math.floor(p.y + b.ry + dy + 0.01);
+                if (ny_check < 0 || (ny_check < CONFIG.H && field[ny_check][nx][nz])) return true;
+            }
+            return false;
+        }
+
+        async function settle() {
+            const py = Math.round(currentPiece.pos.y);
+            currentPiece.blocks.forEach((b, i) => {
+                let tx = (currentPiece.pos.x + b.rx) % CONFIG.W;
+                let tz = (currentPiece.pos.z + b.rz) % CONFIG.D;
+                if (tx < 0) tx += CONFIG.W; if (tz < 0) tz += CONFIG.D;
+                const finalY = py + b.ry;
+                if (finalY < CONFIG.H) {
+                    field[finalY][tx][tz] = currentPiece.meshes[i];
+                    field[finalY][tx][tz].position.set(tx - 0.5, finalY, tz - 0.5);
+                    field[finalY][tx][tz].material.color.set(CONFIG.COLORS.STACKED);
+                    field[finalY][tx][tz].userData.isSolid = false;
+                }
+            });
+            currentPiece = null;
+            await processGameLogic();
+            spawnPiece();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (gameState === 'PLAYING' && !isProcessing) {
+                if (!currentPiece) spawnPiece();
+                if (currentPiece) {
+                    if (!checkCollision(0, -currentPiece.fallSpeed, 0)) {
+                        currentPiece.pos.y -= currentPiece.fallSpeed;
+                    } else settle();
+                    if (currentPiece) {
+                        currentPiece.blocks.forEach((b, i) => {
+                            let tx = (currentPiece.pos.x + b.rx) % 2; if (tx < 0) tx += 2;
+                            let tz = (currentPiece.pos.z + b.rz) % 2; if (tz < 0) tz += 2;
+                            currentPiece.meshes[i].position.set(tx - 0.5, currentPiece.pos.y + b.ry, tz - 0.5);
+                        });
+                    }
+                }
+            }
+            cameraAngle += CONFIG.CAMERA_ROT_SPEED;
+            camera.position.set(Math.sin(cameraAngle) * 8, floorHeight + 8.5, Math.cos(cameraAngle) * 8);
+            camera.lookAt(0, floorHeight + 3.5, 0);
+            renderer.render(scene, camera);
+        }
+
+        function showCombo(count) {
+            if (count < 2) return;
+            const el = document.getElementById('combo');
+            el.innerText = count + " COMBO!";
+            el.style.display = 'block'; el.style.opacity = '1';
+            clearTimeout(el.timer);
+            el.timer = setTimeout(() => {
+                el.style.opacity = '0';
+                setTimeout(() => { if (el.style.opacity === '0') el.style.display = 'none'; }, 500);
+            }, 1000);
+        }
+
+        const onInputStart = (x, y) => {
+            if (gameState === 'TITLE') {
+                gameState = 'PLAYING';
+                document.getElementById('msg').style.display = 'none';
+            } else if (gameState === 'GAMEOVER') {
+                location.reload();
+            }
+            startX = x; startY = y;
+            isSwiping = false;
+        };
+
+        const onInputMove = (x, y) => {
+            if (gameState !== 'PLAYING' || !currentPiece || isProcessing) return;
+            const deltaX = x - startX;
+            const deltaY = y - startY;
+            if (deltaY > 50) {
+                currentPiece.fallSpeed = CONFIG.SPEED_DOWN;
+                isSwiping = true;
+            }
+            if (Math.abs(deltaX) > 30) isSwiping = true;
+        };
+
+        const onInputEnd = (x, y) => {
+            if (gameState !== 'PLAYING' || isProcessing) return;
+            if (currentPiece) currentPiece.fallSpeed = CONFIG.SPEED_BASE;
+            const deltaX = x - startX;
+            const deltaY = y - startY;
+            if (Math.abs(deltaX) > 30 && Math.abs(deltaX) > Math.abs(deltaY)) {
+                if (deltaX < 0) rotatePiece(1);
+                else rotatePiece(-1);
+            }
+            else if (!isSwiping && Math.abs(deltaX) < 10 && Math.abs(deltaY) < 10) {
+                rotatePiece(1);
+            }
+            isSwiping = false;
+        };
+
+        window.addEventListener('mousedown', e => onInputStart(e.clientX, e.clientY));
+        window.addEventListener('mousemove', e => { if (e.buttons > 0) onInputMove(e.clientX, e.clientY); });
+        window.addEventListener('mouseup', e => onInputEnd(e.clientX, e.clientY));
+        window.addEventListener('touchstart', e => { onInputStart(e.touches[0].clientX, e.touches[0].clientY); e.preventDefault(); }, { passive: false });
+        window.addEventListener('touchmove', e => { onInputMove(e.touches[0].clientX, e.touches[0].clientY); e.preventDefault(); }, { passive: false });
+        window.addEventListener('touchend', e => { onInputEnd(e.changedTouches[0].clientX, e.changedTouches[0].clientY); });
+
+        window.addEventListener('keydown', e => {
+            onInputStart(0, 0); if (!currentPiece || isProcessing || gameState === 'GAMEOVER') return;
+            if (e.key === 'ArrowRight') rotatePiece(1);
+            if (e.key === 'ArrowLeft') rotatePiece(-1);
+            if (e.key === 'ArrowDown') currentPiece.fallSpeed = CONFIG.SPEED_DOWN;
+        });
+        window.addEventListener('keyup', e => { if (e.key === 'ArrowDown' && currentPiece) currentPiece.fallSpeed = CONFIG.SPEED_BASE; });
+        window.addEventListener('resize', () => { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
+
+        init();
+    </script>
+</body>
+
+</html>

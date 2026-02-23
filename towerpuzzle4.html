@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Tower Builder - Perfect Fit Edition</title>
+    <title>Tower Builder - Narrow 4 Wrap</title>
     <style>
         :root {
             --field-bg: #1a1a1a;
@@ -55,7 +55,7 @@
             backdrop-filter: blur(5px);
             z-index: 10;
             margin-left: 20px;
-            min-width: 140px;
+            min-width: 120px;
         }
 
         .stat-group {
@@ -89,7 +89,7 @@
             .side-panel {
                 margin-left: 0;
                 margin-top: 10px;
-                width: 90%;
+                width: 80%;
                 flex-direction: row;
                 justify-content: space-around;
             }
@@ -107,22 +107,25 @@
             </div>
             <div class="stat-group" style="align-items: center;">
                 <div class="stat-label" style="margin-bottom: 5px;">NEXT</div>
-                <canvas id="nextCanvas" width="80" height="80"></canvas>
+                <canvas id="nextCanvas" width="60" height="60"></canvas>
             </div>
         </div>
     </div>
 
     <script>
         const CONFIG = {
-            ROWS_DATA: 500, COLS: 9, SIZE: 30, ROWS_VIEW: 15,
-            SPEED_BASE_UNIT: 0.01,
-            SPEED_DOWN: 0.25,
-            CAMERA_SMOOTH: 0.08,
-            NEXT_TURN_WAIT: 200,
+            ROWS_DATA: 500,
+            COLS: 4,
+            SIZE: 50,
+            ROWS_VIEW: 12,
+            SPEED_BASE_UNIT: 0.015,
+            SPEED_DOWN: 0.3,
+            CAMERA_SMOOTH: 0.1,
+            NEXT_TURN_WAIT: 150,
             BLOCK_TYPES: { EMPTY: 0, NORMAL: 1, SOLID: 2 },
             COLORS: {
-                NORMAL_FILL: '#3498db', NORMAL_STROKE: '#2980b9',
-                SOLID_FILL: '#bdc3c7', SOLID_STROKE: '#7f8c8d'
+                NORMAL_FILL: '#e74c3c', NORMAL_STROKE: '#c0392b',
+                SOLID_FILL: '#7f8c8d', SOLID_STROKE: '#2c3e50'
             }
         };
 
@@ -156,10 +159,12 @@
         }
 
         function generatePieceData() {
-            const p = { x: 3, y: 0, blocks: [], fallSpeed: CONFIG.SPEED_BASE_UNIT };
+            const p = { x: 1, y: 0, blocks: [], fallSpeed: CONFIG.SPEED_BASE_UNIT };
             const shapes = [
-                [[0, 0], [1, 0], [0, 1], [1, 1]], [[0, 0], [1, 0], [2, 0]], [[0, 0], [0, 1], [1, 1]],
-                [[0, 0], [1, 0], [2, 0], [1, 1]], [[0, 1], [1, 1], [1, 0], [2, 0]], [[0, 0], [1, 0], [2, 0], [3, 0]]
+                [[0, 0], [1, 0], [0, 1], [1, 1]],
+                [[0, 0], [0, 1], [0, 2]],
+                [[0, 0], [1, 0], [0, 1]],
+                [[0, 0], [1, 0]]
             ];
             const shape = shapes[Math.floor(Math.random() * shapes.length)];
             p.blocks = shape.map(v => ({ relX: v[0], relY: v[1], type: CONFIG.BLOCK_TYPES.NORMAL }));
@@ -216,7 +221,9 @@
             if (gameState === 'TITLE') {
                 ctx.fillStyle = "white"; ctx.textAlign = "center";
                 ctx.font = `bold ${CONFIG.SIZE * 0.7}px Arial`;
-                ctx.fillText("TOWER SLIDER", canvas.width / 2, canvas.height / 2);
+                ctx.fillText("NARROW 4", canvas.width / 2, canvas.height / 2);
+                ctx.font = `${CONFIG.SIZE * 0.4}px Arial`;
+                ctx.fillText("Wrap Edition", canvas.width / 2, canvas.height / 2 + 40);
                 return;
             }
             viewOffsetY += (targetViewOffsetY - viewOffsetY) * CONFIG.CAMERA_SMOOTH;
@@ -229,6 +236,7 @@
             }
             if (currentPiece) {
                 currentPiece.blocks.forEach(b => {
+                    // 表示時の左右ループ対応
                     let drawX = (currentPiece.x + b.relX);
                     drawX = (drawX % CONFIG.COLS + CONFIG.COLS) % CONFIG.COLS;
                     drawBlock(drawX * CONFIG.SIZE, (currentPiece.y + b.relY - viewOffsetY) * CONFIG.SIZE, b.type, false);
@@ -243,12 +251,10 @@
 
         async function settle() {
             if (isSettling) return; isSettling = true;
-
-            // 修正：高速落下中であっても、最も近い整数グリッドに吸着させる
             currentPiece.y = Math.round(currentPiece.y);
-
             currentPiece.blocks.forEach(b => {
                 const fy = Math.round(currentPiece.y + b.relY);
+                // 設置時のX座標ループ対応
                 let fx = Math.round(currentPiece.x + b.relX);
                 fx = (fx % CONFIG.COLS + CONFIG.COLS) % CONFIG.COLS;
                 if (fy >= 0 && fy < CONFIG.ROWS_DATA) field[fy][fx] = b.type;
@@ -269,10 +275,10 @@
                 }
             }
             drawAll(); requestAnimationFrame(loop);
-            nctx.clearRect(0, 0, 80, 80);
+            nctx.clearRect(0, 0, 60, 60);
             if (nextPiece) nextPiece.blocks.forEach(b => {
                 nctx.fillStyle = CONFIG.COLORS.NORMAL_FILL;
-                nctx.fillRect((b.relX + 1) * 20, (b.relY + 1) * 20, 18, 18);
+                nctx.fillRect((b.relX + 0.5) * 20, (b.relY + 0.5) * 20, 18, 18);
             });
         }
 
@@ -294,12 +300,11 @@
         function checkCollision(dx, dy, blocks = currentPiece.blocks) {
             if (!currentPiece) return false;
             return blocks.some(b => {
+                // X座標のループ判定
                 let nx = Math.floor(currentPiece.x + b.relX + dx);
                 nx = (nx % CONFIG.COLS + CONFIG.COLS) % CONFIG.COLS;
 
-                // 次の移動先でのY座標を計算
                 let ny_next = currentPiece.y + b.relY + dy;
-                // 高速落下時でも「少しでも重なるなら衝突」と判定するための調整
                 let ny_check = Math.ceil(ny_next - 0.05);
 
                 if (ny_check >= CONFIG.ROWS_DATA) return true;
@@ -308,7 +313,6 @@
             });
         }
 
-        // --- Input Handlers ---
         let startX = 0, startY = 0, isInputActive = false, hasMoved = false;
 
         function handleStart(x, y) {
@@ -322,8 +326,10 @@
 
             if (Math.abs(dx) > 30) {
                 const dir = dx > 0 ? 1 : -1;
+                // 移動先でも衝突判定
                 if (!checkCollision(dir, 0)) {
                     currentPiece.x += dir;
+                    // X座標のループ補正
                     if (currentPiece.x < 0) currentPiece.x += CONFIG.COLS;
                     if (currentPiece.x >= CONFIG.COLS) currentPiece.x -= CONFIG.COLS;
                     startX = x; hasMoved = true;
