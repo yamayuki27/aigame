@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="UTF-8">
-    <title>3D Planet Fighter - Pro Control</title>
+    <title>3D Planet Fighter - Relative Control & Land Expansion</title>
     <style>
         body {
             margin: 0;
@@ -92,8 +92,8 @@
 
     <div id="screen-title" class="overlay">
         <h1>PLANET FIGHTER</h1>
-        <p>TOUCH / MOUSE: Drag to Turn & Auto-Fire</p>
-        <p>KEYBOARD: Arrows/WASD to Turn, Space to Fire</p>
+        <p>TOUCH: Drag from Start Point to Turn / 2-Finger Tap to Fire</p>
+        <p>MOUSE: Left-Drag to Turn / Right-Click to Fire</p>
         <button onclick="changeState('PREP')">START MISSION</button>
     </div>
 
@@ -127,13 +127,12 @@
         const MAX_POOL_BULLETS = 8;
         const TIME_LIMIT = 180;
 
-        // --- 調整されたパラメータ ---
         let maxSimultaneousBullets = 4;
         const FORWARD_SPEED = 0.001875;
-        const MAX_TURN_SPEED = 0.024; // 0.016 -> 0.024 (旋回性能アップ)
-        const TURN_SPRING = 0.25;      // 0.12 -> 0.25 (レスポンス向上)
-        const TURN_DAMPING = 0.85;     // 制御の収束
-        const BULLET_SPEED = 0.012;    // 弾速も少しアップ
+        const MAX_TURN_SPEED = 0.016;
+        const TURN_SPRING = 0.12;
+        const TURN_DAMPING = 0.82;
+        const BULLET_SPEED = 0.01;
 
         let playerHP = 100;
         let timeLeft = TIME_LIMIT;
@@ -146,10 +145,11 @@
 
         // --- 入力ステート ---
         const keys = {};
+        let isFiring = false;
         let fireTimer = 0;
         let isPointerDown = false;
         let startPointerX = 0;
-        let currentRelativeX = 0;
+        let currentRelativeX = 0; // 開始地点からの距離
 
         const clock = new THREE.Clock();
         const scene = new THREE.Scene();
@@ -163,7 +163,7 @@
         sunLight.position.set(100, 100, 50);
         scene.add(sunLight);
 
-        // --- 惑星生成 ---
+        // --- 惑星生成（陸地 50% 増量版） ---
         function createAdvancedTexture() {
             const canvas = document.createElement('canvas');
             canvas.width = 512; canvas.height = 256;
@@ -183,14 +183,15 @@
                     let n = 0, amp = 1, freq = 0.015, maxV = 0;
                     for (let i = 0; i < 5; i++) { n += valueNoise(x * freq, y * freq) * amp; maxV += amp; amp *= 0.5; freq *= 2.0; }
                     n /= maxV;
-                    const threshold = 0.4;
+
+                    const threshold = 0.4; // しきい値を下げて陸地を50%増加 (以前は0.6)
                     let r, g, b;
                     if (n > threshold) {
                         const h = (n - threshold) / (1.0 - threshold);
-                        r = 110 + h * 50; g = 80 + h * 60; b = 40 + h * 20;
+                        r = 110 + h * 50; g = 80 + h * 60; b = 40 + h * 20; // 土地の色
                     } else {
                         const d = n / threshold;
-                        r = 5 + d * 15; g = 20 + d * 30; b = 80 + d * 80;
+                        r = 5 + d * 15; g = 20 + d * 30; b = 80 + d * 80; // 深い海
                     }
                     const distToPole = Math.min(y, canvas.height - y);
                     if (distToPole < 20) {
@@ -310,40 +311,54 @@
             }
         }
 
+        // 強化された拠点破壊リングエフェクト (サイズ・ばらつき3倍)
         function spawnRing(pos, color) {
             const ring = new THREE.Mesh(
-                new THREE.TorusGeometry(BASE_RADIUS * 0.3, 0.15, 4, 12),
+                new THREE.TorusGeometry(BASE_RADIUS * 0.3, 0.15, 4, 12), // サイズ3倍
                 new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 1.0 })
             );
+            // ばらつき範囲3倍 (multiplyScalar 6)
             const offset = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(6);
             ring.position.copy(pos).add(offset);
             ring.lookAt(new THREE.Vector3(0, 0, 0));
             scene.add(ring); rings.push({ mesh: ring, scale: 1.0, opacity: 1.0 });
         }
 
-        // --- 入力イベント (改善版) ---
-        window.addEventListener('keydown', e => { keys[e.code] = true; });
-        window.addEventListener('keyup', e => { keys[e.code] = false; });
+        // --- 入力イベント (相対移動方式) ---
+        window.addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'Space') isFiring = true; });
+        window.addEventListener('keyup', e => { keys[e.code] = false; if (e.code === 'Space') isFiring = false; });
 
-        // マウス/タッチ共通のダウン処理
-        function onPointerDown(x) {
-            isPointerDown = true;
-            startPointerX = x;
-            currentRelativeX = 0;
-        }
-
-        window.addEventListener('mousedown', e => { if (e.button === 0) onPointerDown(e.clientX); });
-        window.addEventListener('mousemove', e => { if (isPointerDown) currentRelativeX = e.clientX - startPointerX; });
+        // マウス
+        window.addEventListener('mousedown', e => {
+            if (e.button === 0) { isPointerDown = true; startPointerX = e.clientX; currentRelativeX = 0; }
+        });
+        window.addEventListener('mousemove', e => {
+            if (isPointerDown) { currentRelativeX = e.clientX - startPointerX; }
+        });
         window.addEventListener('mouseup', () => { isPointerDown = false; currentRelativeX = 0; });
+        window.addEventListener('contextmenu', e => {
+            e.preventDefault(); isFiring = true; setTimeout(() => { isFiring = false; }, 200);
+        });
 
+        // タッチ
         window.addEventListener('touchstart', e => {
-            onPointerDown(e.touches[0].clientX);
+            if (e.touches.length === 2) { isFiring = true; }
+            else {
+                isPointerDown = true;
+                startPointerX = e.touches[0].clientX;
+                currentRelativeX = 0;
+            }
         }, { passive: false });
         window.addEventListener('touchmove', e => {
             e.preventDefault();
-            if (isPointerDown) currentRelativeX = e.touches[0].clientX - startPointerX;
+            if (e.touches.length === 1 && isPointerDown) {
+                currentRelativeX = e.touches[0].clientX - startPointerX;
+            }
         }, { passive: false });
-        window.addEventListener('touchend', () => { isPointerDown = false; currentRelativeX = 0; });
+        window.addEventListener('touchend', e => {
+            if (e.touches.length < 2) isFiring = false;
+            if (e.touches.length === 0) { isPointerDown = false; currentRelativeX = 0; }
+        });
 
         function updateUI() {
             if (currentState !== GameState.GAME || bases.length === 0) return;
@@ -368,15 +383,17 @@
                 timeLeft -= delta;
                 updateUI();
 
-                // 旋回計算
+                // 相対移動による旋回計算
                 let targetTurn = 0;
+                // 1. キーボード
                 if (keys['ArrowLeft'] || keys['KeyA']) targetTurn += MAX_TURN_SPEED;
                 if (keys['ArrowRight'] || keys['KeyD']) targetTurn -= MAX_TURN_SPEED;
 
-                if (isPointerDown) {
-                    // 相対移動の感度を上げ、非線形に（遠くほど急旋回）
-                    const sense = 0.0005;
-                    targetTurn = -currentRelativeX * sense;
+                // 2. マウス/タッチ (開始地点からの相対距離を旋回速度に変換)
+                if (isPointerDown && Math.abs(currentRelativeX) > 10) {
+                    // 100ピクセル以上離れたら最大旋回速度になるように感度調整
+                    const sensitivity = 0.0002;
+                    targetTurn += -currentRelativeX * sensitivity;
                     targetTurn = THREE.MathUtils.clamp(targetTurn, -MAX_TURN_SPEED, MAX_TURN_SPEED);
                 }
 
@@ -387,18 +404,18 @@
                 shipGroup.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), currentTurnVelocity));
                 shipGroup.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), FORWARD_SPEED));
                 shipGroup.position.copy(new THREE.Vector3(0, PLANET_RADIUS + ALTITUDE, 0)).applyQuaternion(shipGroup.quaternion);
-                shipMesh.rotation.z = -currentTurnVelocity * 12;
+                shipMesh.rotation.z = -currentTurnVelocity * 15;
 
-                // 射撃（ポインターダウン中またはスペースキーで自動連射）
+                // 弾丸発射
                 if (fireTimer > 0) fireTimer--;
-                if ((isPointerDown || keys['Space']) && fireTimer <= 0) {
+                if (isFiring && fireTimer <= 0) {
                     const activeCount = bulletPool.filter(b => b.userData.active).length;
                     if (activeCount < maxSimultaneousBullets) {
                         const b = bulletPool.find(b => !b.userData.active);
                         if (b) {
                             b.visible = true; b.userData.active = true; b.userData.distance = 0;
                             b.quaternion.copy(shipGroup.quaternion);
-                            fireTimer = 14; // 連射間隔を少し短縮
+                            fireTimer = 18;
                         }
                     }
                 }
@@ -431,7 +448,7 @@
                             base.userData.tilted = true; base.userData.active = false;
                         }
                     }
-                    if (base.userData.active && !base.userData.dying && !base.userData.isPlayer && shipGroup.position.distanceTo(base.position) < BASE_RADIUS + 2) playerHP -= 0.3;
+                    if (base.userData.active && !base.userData.dying && !base.userData.isPlayer && shipGroup.position.distanceTo(base.position) < BASE_RADIUS + 2) playerHP -= 0.2;
                 });
 
                 items.forEach(item => {
