@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="UTF-8">
-    <title>3D Planet Fighter - Lite</title>
+    <title>3D Planet Fighter - Pro Control</title>
     <style>
         body {
             margin: 0;
@@ -50,6 +50,10 @@
             margin-top: 20px;
         }
 
+        button:hover {
+            background: #fff;
+        }
+
         #ui {
             position: absolute;
             top: 20px;
@@ -71,6 +75,7 @@
             font-size: 80px;
             font-weight: bold;
             pointer-events: none;
+            text-shadow: 0 0 20px #000;
             z-index: 6;
             display: none;
         }
@@ -122,71 +127,94 @@
         const MAX_POOL_BULLETS = 8;
         const TIME_LIMIT = 180;
 
+        // --- 調整されたパラメータ ---
         let maxSimultaneousBullets = 4;
         const FORWARD_SPEED = 0.001875;
-        const MAX_TURN_SPEED = 0.024;
-        const TURN_SPRING = 0.25;
-        const TURN_DAMPING = 0.85;
-        const BULLET_SPEED = 0.012;
+        const MAX_TURN_SPEED = 0.024; // 0.016 -> 0.024 (旋回性能アップ)
+        const TURN_SPRING = 0.25;      // 0.12 -> 0.25 (レスポンス向上)
+        const TURN_DAMPING = 0.85;     // 制御の収束
+        const BULLET_SPEED = 0.012;    // 弾速も少しアップ
 
         let playerHP = 100;
         let timeLeft = TIME_LIMIT;
         let currentTurnVelocity = 0;
         let turnSpringVelocity = 0;
-        let bases = [], particles = [], rings = [], items = [];
+        let bases = [];
+        let particles = [];
+        let rings = [];
+        let items = [];
+
+        // --- 入力ステート ---
         const keys = {};
-        let fireTimer = 0, isPointerDown = false, startPointerX = 0, currentRelativeX = 0;
+        let fireTimer = 0;
+        let isPointerDown = false;
+        let startPointerX = 0;
+        let currentRelativeX = 0;
 
         const clock = new THREE.Clock();
         const scene = new THREE.Scene();
-        const renderer = new THREE.WebGLRenderer({ antialias: false });
-        renderer.setPixelRatio(1);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
         renderer.setSize(window.innerWidth, window.innerHeight);
         document.body.appendChild(renderer.domElement);
 
-        function createPlanetTexture() {
+        scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+        const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+        sunLight.position.set(100, 100, 50);
+        scene.add(sunLight);
+
+        // --- 惑星生成 ---
+        function createAdvancedTexture() {
             const canvas = document.createElement('canvas');
-            canvas.width = 256; canvas.height = 128;
+            canvas.width = 512; canvas.height = 256;
             const ctx = canvas.getContext('2d');
             const imgData = ctx.createImageData(canvas.width, canvas.height);
-
-            // 市松模様の設定：tileSizeを16にすることで、従来の細かい点よりも約8倍〜の大きさになります
-            const tileSize = 16;
-
+            const random = (ix, iy) => (Math.sin(ix * 12.9898 + iy * 78.233) * 43758.5453) % 1;
+            const valueNoise = (x, y) => {
+                const ix = Math.floor(x), iy = Math.floor(y);
+                const fx = x - ix, fy = y - iy;
+                const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+                const v00 = Math.abs(random(ix, iy)), v10 = Math.abs(random(ix + 1, iy));
+                const v01 = Math.abs(random(ix, iy + 1)), v11 = Math.abs(random(ix + 1, iy + 1));
+                return v00 + sx * (v10 - v00) + sy * (v01 - v00 + sx * (v11 - v01 - v10 + v00));
+            };
             for (let y = 0; y < canvas.height; y++) {
                 for (let x = 0; x < canvas.width; x++) {
-                    const idx = (x + y * canvas.width) * 4;
-                    // 市松模様のロジック
-                    const isGreen = (Math.floor(x / tileSize) + Math.floor(y / tileSize)) % 2 === 0;
-
-                    if (isGreen) {
-                        // 緑色 (Forest Green)
-                        imgData.data[idx] = 34; imgData.data[idx + 1] = 139; imgData.data[idx + 2] = 34;
+                    let n = 0, amp = 1, freq = 0.015, maxV = 0;
+                    for (let i = 0; i < 5; i++) { n += valueNoise(x * freq, y * freq) * amp; maxV += amp; amp *= 0.5; freq *= 2.0; }
+                    n /= maxV;
+                    const threshold = 0.4;
+                    let r, g, b;
+                    if (n > threshold) {
+                        const h = (n - threshold) / (1.0 - threshold);
+                        r = 110 + h * 50; g = 80 + h * 60; b = 40 + h * 20;
                     } else {
-                        // 青色 (Royal Blue)
-                        imgData.data[idx] = 30; imgData.data[idx + 1] = 60; imgData.data[idx + 2] = 180;
+                        const d = n / threshold;
+                        r = 5 + d * 15; g = 20 + d * 30; b = 80 + d * 80;
                     }
-                    imgData.data[idx + 3] = 255;
+                    const distToPole = Math.min(y, canvas.height - y);
+                    if (distToPole < 20) {
+                        const lerp = Math.pow(1 - (distToPole / 20), 3);
+                        r += (255 - r) * lerp; g += (255 - g) * lerp; b += (255 - b) * lerp;
+                    }
+                    const idx = (x + y * canvas.width) * 4;
+                    imgData.data[idx] = r; imgData.data[idx + 1] = g; imgData.data[idx + 2] = b; imgData.data[idx + 3] = 255;
                 }
             }
             ctx.putImageData(imgData, 0, 0);
             return new THREE.CanvasTexture(canvas);
         }
 
-        const bulletGeo = new THREE.CylinderGeometry(0.3, 0.3, 2, 6).rotateX(Math.PI / 2);
-        const bulletMat = new THREE.MeshBasicMaterial({ color: 0xffaa00 });
-        const particleGeo = new THREE.SphereGeometry(0.3, 4, 4);
-
         const planet = new THREE.Mesh(
-            new THREE.SphereGeometry(PLANET_RADIUS, 24, 16),
-            new THREE.MeshBasicMaterial({ map: createPlanetTexture() })
+            new THREE.SphereGeometry(PLANET_RADIUS, 32, 24),
+            new THREE.MeshStandardMaterial({ map: createAdvancedTexture(), roughness: 0.8, flatShading: true })
         );
         scene.add(planet);
 
         const shipGroup = new THREE.Group();
         const shipMesh = new THREE.Mesh(
             new THREE.ConeGeometry(1.5, SHIP_SIZE, 5).rotateX(Math.PI / 2),
-            new THREE.MeshBasicMaterial({ color: 0xffcc00 })
+            new THREE.MeshStandardMaterial({ color: 0xffcc00, flatShading: true })
         );
         shipGroup.add(shipMesh);
         scene.add(shipGroup);
@@ -197,11 +225,12 @@
 
         const bulletPool = [];
         for (let i = 0; i < MAX_POOL_BULLETS; i++) {
-            const b = new THREE.Mesh(bulletGeo, bulletMat);
+            const b = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 2, 6).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xffaa00 }));
             b.visible = false; b.userData = { active: false, distance: 0 };
             scene.add(b); bulletPool.push(b);
         }
 
+        // --- 状態管理 ---
         window.changeState = function (newState) {
             currentState = newState;
             document.querySelectorAll('.overlay').forEach(el => el.classList.add('hidden'));
@@ -225,8 +254,8 @@
         function resetGameData() {
             playerHP = 100; timeLeft = TIME_LIMIT; maxSimultaneousBullets = 4;
             currentTurnVelocity = 0; turnSpringVelocity = 0; currentRelativeX = 0;
-            bases.forEach(b => { scene.remove(b); });
-            items.forEach(i => { scene.remove(i); });
+            bases.forEach(b => { scene.remove(b); b.geometry.dispose(); b.material.dispose(); });
+            items.forEach(i => { scene.remove(i); i.geometry.dispose(); i.material.dispose(); });
             bases = []; items = [];
             createBases(); createItems();
             shipGroup.quaternion.set(0, 0, 0, 1);
@@ -234,10 +263,12 @@
         }
 
         function createBases() {
-            const baseGeo = new THREE.CylinderGeometry(BASE_RADIUS, BASE_RADIUS, BASE_HEIGHT, 8);
             for (let i = 0; i < 4; i++) {
                 const isPlayer = (i === 0);
-                const base = new THREE.Mesh(baseGeo, new THREE.MeshBasicMaterial({ color: isPlayer ? 0xffcc00 : 0xff4444 }));
+                const base = new THREE.Mesh(
+                    new THREE.CylinderGeometry(BASE_RADIUS, BASE_RADIUS, BASE_HEIGHT, 8),
+                    new THREE.MeshStandardMaterial({ color: isPlayer ? 0xffcc00 : 0xff4444, flatShading: true })
+                );
                 let pos;
                 do {
                     const phi = Math.acos(2 * Math.random() - 1);
@@ -254,9 +285,9 @@
         }
 
         function createItems() {
-            const itemGeo = new THREE.CylinderGeometry(1.5, 1.5, 0.5, 4);
-            itemGeo.rotateY(Math.PI / 4); itemGeo.rotateX(Math.PI / 2);
             for (let i = 0; i < 4; i++) {
+                const itemGeo = new THREE.CylinderGeometry(1.5, 1.5, 0.5, 4);
+                itemGeo.rotateY(Math.PI / 4); itemGeo.rotateX(Math.PI / 2);
                 const item = new THREE.Mesh(itemGeo, new THREE.MeshBasicMaterial({ color: 0x00ffff }));
                 let pos;
                 do {
@@ -272,7 +303,7 @@
 
         function spawnParticles(pos, color, count, speed, life) {
             for (let i = 0; i < count; i++) {
-                const p = new THREE.Mesh(particleGeo, new THREE.MeshBasicMaterial({ color: color }));
+                const p = new THREE.Mesh(new THREE.SphereGeometry(0.3, 4, 4), new THREE.MeshBasicMaterial({ color: color }));
                 p.position.copy(pos);
                 particles.push({ mesh: p, vel: new THREE.Vector3((Math.random() - 0.5) * speed, (Math.random() - 0.5) * speed, (Math.random() - 0.5) * speed), life: life });
                 scene.add(p);
@@ -290,14 +321,28 @@
             scene.add(ring); rings.push({ mesh: ring, scale: 1.0, opacity: 1.0 });
         }
 
+        // --- 入力イベント (改善版) ---
         window.addEventListener('keydown', e => { keys[e.code] = true; });
         window.addEventListener('keyup', e => { keys[e.code] = false; });
-        function onPointerDown(x) { isPointerDown = true; startPointerX = x; currentRelativeX = 0; }
+
+        // マウス/タッチ共通のダウン処理
+        function onPointerDown(x) {
+            isPointerDown = true;
+            startPointerX = x;
+            currentRelativeX = 0;
+        }
+
         window.addEventListener('mousedown', e => { if (e.button === 0) onPointerDown(e.clientX); });
         window.addEventListener('mousemove', e => { if (isPointerDown) currentRelativeX = e.clientX - startPointerX; });
         window.addEventListener('mouseup', () => { isPointerDown = false; currentRelativeX = 0; });
-        window.addEventListener('touchstart', e => { onPointerDown(e.touches[0].clientX); }, { passive: false });
-        window.addEventListener('touchmove', e => { e.preventDefault(); if (isPointerDown) currentRelativeX = e.touches[0].clientX - startPointerX; }, { passive: false });
+
+        window.addEventListener('touchstart', e => {
+            onPointerDown(e.touches[0].clientX);
+        }, { passive: false });
+        window.addEventListener('touchmove', e => {
+            e.preventDefault();
+            if (isPointerDown) currentRelativeX = e.touches[0].clientX - startPointerX;
+        }, { passive: false });
         window.addEventListener('touchend', () => { isPointerDown = false; currentRelativeX = 0; });
 
         function updateUI() {
@@ -322,12 +367,19 @@
             if (currentState === GameState.GAME) {
                 timeLeft -= delta;
                 updateUI();
+
+                // 旋回計算
                 let targetTurn = 0;
                 if (keys['ArrowLeft'] || keys['KeyA']) targetTurn += MAX_TURN_SPEED;
                 if (keys['ArrowRight'] || keys['KeyD']) targetTurn -= MAX_TURN_SPEED;
+
                 if (isPointerDown) {
-                    targetTurn = THREE.MathUtils.clamp(-currentRelativeX * 0.0005, -MAX_TURN_SPEED, MAX_TURN_SPEED);
+                    // 相対移動の感度を上げ、非線形に（遠くほど急旋回）
+                    const sense = 0.0005;
+                    targetTurn = -currentRelativeX * sense;
+                    targetTurn = THREE.MathUtils.clamp(targetTurn, -MAX_TURN_SPEED, MAX_TURN_SPEED);
                 }
+
                 turnSpringVelocity += (targetTurn - currentTurnVelocity) * TURN_SPRING;
                 turnSpringVelocity *= TURN_DAMPING;
                 currentTurnVelocity += turnSpringVelocity;
@@ -337,15 +389,16 @@
                 shipGroup.position.copy(new THREE.Vector3(0, PLANET_RADIUS + ALTITUDE, 0)).applyQuaternion(shipGroup.quaternion);
                 shipMesh.rotation.z = -currentTurnVelocity * 12;
 
+                // 射撃（ポインターダウン中またはスペースキーで自動連射）
                 if (fireTimer > 0) fireTimer--;
                 if ((isPointerDown || keys['Space']) && fireTimer <= 0) {
-                    const activeBullets = bulletPool.filter(b => b.userData.active);
-                    if (activeBullets.length < maxSimultaneousBullets) {
+                    const activeCount = bulletPool.filter(b => b.userData.active).length;
+                    if (activeCount < maxSimultaneousBullets) {
                         const b = bulletPool.find(b => !b.userData.active);
                         if (b) {
                             b.visible = true; b.userData.active = true; b.userData.distance = 0;
                             b.quaternion.copy(shipGroup.quaternion);
-                            fireTimer = 14;
+                            fireTimer = 14; // 連射間隔を少し短縮
                         }
                     }
                 }
@@ -372,7 +425,7 @@
                         if (base.userData.sink < BASE_HEIGHT * 0.7) {
                             base.userData.sink += 0.05;
                             base.position.copy(base.userData.origin).sub(base.userData.normal.clone().multiplyScalar(base.userData.sink));
-                            if (Math.random() > 0.8) spawnRing(base.position, 0xff8800);
+                            if (Math.random() > 0.7) spawnRing(base.position, 0xff8800);
                         } else {
                             base.rotateOnAxis(new THREE.Vector3(Math.random(), Math.random(), Math.random()).normalize(), Math.PI / 6);
                             base.userData.tilted = true; base.userData.active = false;
