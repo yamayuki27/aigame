@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>3D Planet Fighter - Screen Transition Edition</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #000;
+            touch-action: none;
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        /* 全画面共通のUIレイヤー */
+        .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #ffcc00;
+            text-align: center;
+            background: rgba(0, 0, 0, 0.7);
+            /* 背景を少し暗く */
+            z-index: 10;
+        }
+
+        h1 {
+            font-size: 48px;
+            text-shadow: 3px 3px 0px #ff4444;
+        }
+
+        button {
+            padding: 15px 30px;
+            font-size: 20px;
+            background: #ffcc00;
+            border: none;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: bold;
+            margin-top: 20px;
+        }
+
+        button:hover {
+            background: #fff;
+        }
+
+        /* ゲーム中のHUD (左上の情報) */
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #ffcc00;
+            font-size: 20px;
+            pointer-events: none;
+            text-shadow: 2px 2px 4px #000;
+            z-index: 5;
+            display: none;
+            /* 初期状態は非表示 */
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">MISSION: DESTROY RED BASES<br>PLAYER HP: 100<br>AMMO: 4/4</div>
+
+    <div id="screen-title" class="overlay">
+        <h1>PLANET FIGHTER</h1>
+        <p>3D Space Combat Simulation</p>
+        <button onclick="changeState('PREP')">START MISSION</button>
+    </div>
+
+    <div id="screen-prep" class="overlay hidden">
+        <h1>PREPARING...</h1>
+        <p>SYNCING SYSTEMS WITH PLANET ORBIT</p>
+        <p id="prep-status">Waiting for connection...</p>
+        <button id="btn-go" class="hidden" onclick="changeState('GAME')">GO!</button>
+    </div>
+
+    <div id="screen-gameover" class="overlay hidden">
+        <h1 id="gameover-title">MISSION FAILED</h1>
+        <p id="gameover-score"></p>
+        <button onclick="changeState('TITLE')">BACK TO BASE</button>
+    </div>
+
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- ゲーム状態管理 ---
+        const GameState = {
+            TITLE: 'TITLE',
+            PREP: 'PREP',
+            GAME: 'GAME',
+            GAMEOVER: 'GAMEOVER'
+        };
+        let currentState = GameState.TITLE;
+
+        // --- ゲーム定数 ---
+        const PLANET_RADIUS = 100;
+        const SHIP_SIZE = 3.75;
+        const ALTITUDE = 2;
+        const BASE_RADIUS = 3;
+        const BASE_HEIGHT = 5;
+        const MAX_POOL_BULLETS = 8;
+
+        let maxSimultaneousBullets = 4;
+        const FORWARD_SPEED = 0.001875;
+        const TURN_SPEED = 0.016;
+        const BULLET_SPEED = 0.01;
+
+        let playerHP = 100;
+        let bases = [];
+        let particles = [];
+        let rings = [];
+        let items = [];
+        let score = 0;
+
+        // --- シーン・カメラ・レンダラー (初期化) ---
+        const scene = new THREE.Scene();
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+        const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+        sunLight.position.set(100, 100, 50);
+        scene.add(sunLight);
+
+        // --- 惑星の生成 (一度だけ実行) ---
+        function createAdvancedTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512; canvas.height = 256;
+            const ctx = canvas.getContext('2d');
+            const imgData = ctx.createImageData(canvas.width, canvas.height);
+            const random = (ix, iy) => {
+                const dot = ix * 12.9898 + iy * 78.233;
+                const r = (Math.sin(dot) * 43758.5453) % 1;
+                return r < 0 ? r + 1 : r;
+            };
+            const valueNoise = (x, y) => {
+                const ix = Math.floor(x); const iy = Math.floor(y);
+                const fx = x - ix; const fy = y - iy;
+                const sx = fx * fx * (3 - 2 * fx); const sy = fy * fy * (3 - 2 * fy);
+                const v00 = random(ix, iy); const v10 = random(ix + 1, iy);
+                const v01 = random(ix, iy + 1); const v11 = random(ix + 1, iy + 1);
+                return v00 + sx * (v10 - v00) + sy * (v01 + sx * (v11 - v01) - (v00 + sx * (v10 - v00)));
+            };
+            for (let y = 0; y < canvas.height; y++) {
+                for (let x = 0; x < canvas.width; x++) {
+                    let n = 0, amp = 1, freq = 0.015, maxV = 0;
+                    for (let i = 0; i < 5; i++) { n += valueNoise(x * freq, y * freq) * amp; maxV += amp; amp *= 0.5; freq *= 2.0; }
+                    n /= maxV;
+                    const threshold = 0.7;
+                    let r, g, b;
+                    if (n > threshold) {
+                        const h = (n - threshold) / (1.0 - threshold);
+                        r = 120 + h * 40; g = 90 + h * 50; b = 50 + h * 20;
+                    } else {
+                        const d = n / threshold;
+                        r = 10 + d * 30; g = 50 + d * 50; b = 130 + d * 80;
+                    }
+                    const idx = (x + y * canvas.width) * 4;
+                    imgData.data[idx] = r; imgData.data[idx + 1] = g; imgData.data[idx + 2] = b; imgData.data[idx + 3] = 255;
+                }
+            }
+            ctx.putImageData(imgData, 0, 0);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        const planet = new THREE.Mesh(
+            new THREE.SphereGeometry(PLANET_RADIUS, 32, 24),
+            new THREE.MeshStandardMaterial({ map: createAdvancedTexture(), roughness: 0.8, flatShading: true })
+        );
+        scene.add(planet);
+
+        // --- 戦闘機 ---
+        const shipGroup = new THREE.Group();
+        const shipMesh = new THREE.Mesh(
+            new THREE.ConeGeometry(1.5, SHIP_SIZE, 5).rotateX(Math.PI / 2),
+            new THREE.MeshStandardMaterial({ color: 0xffcc00, flatShading: true })
+        );
+        shipGroup.add(shipMesh);
+        scene.add(shipGroup);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 30, 0);
+        camera.up.set(0, 0, 1);
+        camera.lookAt(0, 0, 10);
+        shipGroup.add(camera);
+
+        // --- 弾丸プール ---
+        const bulletPool = [];
+        for (let i = 0; i < MAX_POOL_BULLETS; i++) {
+            const b = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.3, 0.3, 2, 6).rotateX(Math.PI / 2),
+                new THREE.MeshBasicMaterial({ color: 0xffaa00 })
+            );
+            b.visible = false;
+            b.userData = { active: false, distance: 0 };
+            scene.add(b);
+            bulletPool.push(b);
+        }
+
+        // --- 状態遷移関数 ---
+        window.changeState = function (newState) {
+            currentState = newState;
+
+            // 全UIを隠す
+            document.getElementById('screen-title').classList.add('hidden');
+            document.getElementById('screen-prep').classList.add('hidden');
+            document.getElementById('screen-gameover').classList.add('hidden');
+            document.getElementById('ui').style.display = 'none';
+
+            if (newState === GameState.TITLE) {
+                document.getElementById('screen-title').classList.remove('hidden');
+                resetGameData();
+            }
+            else if (newState === GameState.PREP) {
+                document.getElementById('screen-prep').classList.remove('hidden');
+                const status = document.getElementById('prep-status');
+                const btnGo = document.getElementById('btn-go');
+                btnGo.classList.add('hidden');
+                status.innerText = "Connecting to Satellite...";
+
+                // 擬似的な待機時間 (マッチング想定)
+                setTimeout(() => {
+                    status.innerText = "Ready to Launch!";
+                    btnGo.classList.remove('hidden');
+                }, 1500);
+            }
+            else if (newState === GameState.GAME) {
+                document.getElementById('ui').style.display = 'block';
+                updateUI();
+            }
+            else if (newState === GameState.GAMEOVER) {
+                document.getElementById('screen-gameover').classList.remove('hidden');
+                const activeBases = bases.filter(b => !b.userData.isPlayer && b.userData.active).length;
+                if (playerHP <= 0) {
+                    document.getElementById('gameover-title').innerText = "MISSION FAILED";
+                    document.getElementById('gameover-score').innerText = "Your fighter was destroyed.";
+                } else {
+                    document.getElementById('gameover-title').innerText = "MISSION CLEAR!";
+                    document.getElementById('gameover-score').innerText = "All enemy bases destroyed!";
+                }
+            }
+        };
+
+        // --- ゲームのリセット ---
+        function resetGameData() {
+            playerHP = 100;
+            maxSimultaneousBullets = 4;
+            // 既存の基地、アイテム、エフェクトを削除
+            bases.forEach(b => scene.remove(b));
+            items.forEach(i => scene.remove(i));
+            bases = []; items = [];
+
+            // 再生成
+            createBases();
+            createItems();
+
+            // 機体位置リセット
+            shipGroup.quaternion.set(0, 0, 0, 1);
+            shipGroup.position.set(0, PLANET_RADIUS + ALTITUDE, 0);
+
+            // 弾丸リセット
+            bulletPool.forEach(b => { b.userData.active = false; b.visible = false; });
+        }
+
+        // (既存の基地・アイテム・エフェクト生成関数はそのまま)
+        function createBases() {
+            for (let i = 0; i < 4; i++) {
+                const isPlayer = (i === 0);
+                const base = new THREE.Mesh(
+                    new THREE.CylinderGeometry(BASE_RADIUS, BASE_RADIUS, BASE_HEIGHT, 8),
+                    new THREE.MeshStandardMaterial({ color: isPlayer ? 0xffcc00 : 0xff4444, flatShading: true })
+                );
+                let pos;
+                do {
+                    const phi = Math.acos(2 * Math.random() - 1);
+                    const theta = 2 * Math.PI * Math.random();
+                    pos = new THREE.Vector3().setFromSphericalCoords(PLANET_RADIUS, phi, theta);
+                } while (pos.distanceTo(new THREE.Vector3(0, PLANET_RADIUS, 0)) < 60);
+                base.position.copy(pos);
+                const normal = pos.clone().normalize();
+                base.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
+                base.position.add(normal.clone().multiplyScalar(BASE_HEIGHT * 0.4));
+                base.userData = { hp: 8, active: true, dying: false, isPlayer, normal, origin: base.position.clone(), sink: 0 };
+                scene.add(base);
+                bases.push(base);
+            }
+        }
+
+        function createItems() {
+            for (let i = 0; i < 4; i++) {
+                const itemGeo = new THREE.CylinderGeometry(1.5, 1.5, 0.5, 4);
+                itemGeo.rotateY(Math.PI / 4); itemGeo.rotateX(Math.PI / 2);
+                const itemMesh = new THREE.Mesh(itemGeo, new THREE.MeshBasicMaterial({ color: 0x00ffff }));
+                let pos;
+                do {
+                    const phi = Math.acos(2 * Math.random() - 1);
+                    const theta = 2 * Math.PI * Math.random();
+                    pos = new THREE.Vector3().setFromSphericalCoords(PLANET_RADIUS + ALTITUDE, phi, theta);
+                } while (pos.distanceTo(new THREE.Vector3(0, PLANET_RADIUS + ALTITUDE, 0)) < 40);
+                itemMesh.position.copy(pos);
+                const normal = pos.clone().normalize();
+                itemMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+                itemMesh.userData = { active: true };
+                scene.add(itemMesh);
+                items.push(itemMesh);
+            }
+        }
+
+        // エフェクト系 (spawnParticles, spawnRing) は元のコードと同じため省略せず含めます
+        function spawnParticles(pos, color, count, speed, life) {
+            for (let i = 0; i < count; i++) {
+                const p = new THREE.Mesh(new THREE.SphereGeometry(0.3, 4, 4), new THREE.MeshBasicMaterial({ color: color }));
+                p.position.copy(pos);
+                particles.push({ mesh: p, vel: new THREE.Vector3((Math.random() - 0.5) * speed, (Math.random() - 0.5) * speed, (Math.random() - 0.5) * speed), life: life });
+                scene.add(p);
+            }
+        }
+        function spawnRing(pos, color) {
+            const ring = new THREE.Mesh(new THREE.TorusGeometry(BASE_RADIUS, 0.3, 4, 16), new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 1.0, side: THREE.DoubleSide }));
+            ring.position.copy(pos); ring.lookAt(new THREE.Vector3(0, 0, 0));
+            scene.add(ring);
+            rings.push({ mesh: ring, scale: 1.0, opacity: 1.0 });
+        }
+
+        // --- 入力系 ---
+        const keys = {};
+        let isFiring = false, fireTimer = 0;
+        window.addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'Space') isFiring = true; });
+        window.addEventListener('keyup', e => { keys[e.code] = false; if (e.code === 'Space') isFiring = false; });
+        window.addEventListener('mousedown', () => { isFiring = true; });
+        window.addEventListener('mouseup', () => { isFiring = false; });
+
+        function updateUI() {
+            const activeBullets = bulletPool.filter(b => b.userData.active).length;
+            const enemyBases = bases.filter(b => !b.userData.isPlayer && b.userData.active).length;
+            document.getElementById('ui').innerHTML = `MISSION: ${enemyBases} BASES LEFT<br>PLAYER HP: ${Math.max(0, Math.floor(playerHP))}<br>AMMO: ${maxSimultaneousBullets - activeBullets}/${maxSimultaneousBullets}`;
+
+            // 勝利判定
+            if (enemyBases === 0 && currentState === GameState.GAME) changeState(GameState.GAMEOVER);
+            // 敗北判定
+            if (playerHP <= 0 && currentState === GameState.GAME) changeState(GameState.GAMEOVER);
+        }
+
+        // --- メインループ ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 背景（惑星）は常に回しておくと綺麗
+            planet.rotateY(0.0005);
+
+            if (currentState === GameState.GAME) {
+                // 1. 移動
+                let turn = (keys['ArrowLeft'] || keys['KeyA'] ? TURN_SPEED : 0) + (keys['ArrowRight'] || keys['KeyD'] ? -TURN_SPEED : 0);
+                shipGroup.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), turn));
+                shipGroup.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), FORWARD_SPEED));
+                shipGroup.position.copy(new THREE.Vector3(0, PLANET_RADIUS + ALTITUDE, 0)).applyQuaternion(shipGroup.quaternion);
+
+                // 2. 弾丸更新
+                bulletPool.forEach(b => {
+                    if (!b.userData.active) return;
+                    b.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), BULLET_SPEED));
+                    b.position.copy(new THREE.Vector3(0, PLANET_RADIUS + ALTITUDE, 0)).applyQuaternion(b.quaternion);
+                    bases.forEach(base => {
+                        if (base.userData.active && !base.userData.dying && !base.userData.isPlayer) {
+                            if (b.position.distanceTo(base.position) < BASE_RADIUS + 2) {
+                                base.userData.hp--; b.userData.active = false; b.visible = false;
+                                spawnParticles(b.position, 0xffaa00, 6, 0.6, 20);
+                                if (base.userData.hp <= 0) { base.userData.dying = true; spawnRing(base.position, 0xffaa00); }
+                                updateUI();
+                            }
+                        }
+                    });
+                    b.userData.distance += BULLET_SPEED;
+                    if (b.userData.distance > Math.PI) { b.userData.active = false; b.visible = false; updateUI(); }
+                });
+
+                // 3. 基地・アイテム・エフェクト更新 (元のロジックを維持)
+                bases.forEach(base => {
+                    if (base.userData.dying) {
+                        base.userData.sink += 0.05;
+                        base.material.color.lerp(new THREE.Color(0x000000), 0.05);
+                        const shake = new THREE.Vector3((Math.random() - 0.5), 0, (Math.random() - 0.5)).multiplyScalar(0.3);
+                        base.position.copy(base.userData.origin).add(shake).sub(base.userData.normal.clone().multiplyScalar(base.userData.sink));
+                        if (base.userData.sink > BASE_HEIGHT) { base.userData.active = false; base.visible = false; updateUI(); }
+                    }
+                    if (base.userData.active && !base.userData.dying && shipGroup.position.distanceTo(base.position) < BASE_RADIUS + 2) {
+                        playerHP -= 0.2; updateUI();
+                    }
+                });
+
+                items.forEach(item => {
+                    if (item.userData.active) {
+                        item.rotateZ(0.02);
+                        if (shipGroup.position.distanceTo(item.position) < 3.5) {
+                            item.userData.active = false; item.visible = false;
+                            maxSimultaneousBullets = Math.min(8, maxSimultaneousBullets + 1);
+                            spawnParticles(item.position, 0x00ffff, 15, 0.8, 30);
+                            updateUI();
+                        }
+                    }
+                });
+
+                if (isFiring && fireTimer <= 0) {
+                    const activeCount = bulletPool.filter(b => b.userData.active).length;
+                    if (activeCount < maxSimultaneousBullets) {
+                        const b = bulletPool.find(b => !b.userData.active);
+                        if (b) { b.visible = true; b.userData.active = true; b.userData.distance = 0; b.quaternion.copy(shipGroup.quaternion); updateUI(); }
+                        fireTimer = 25;
+                    }
+                }
+                fireTimer--;
+            }
+
+            // エフェクトはどの状態でも更新（消えていく演出のため）
+            for (let i = particles.length - 1; i >= 0; i--) {
+                particles[i].mesh.position.add(particles[i].vel);
+                if (--particles[i].life <= 0) { scene.remove(particles[i].mesh); particles.splice(i, 1); }
+            }
+            for (let i = rings.length - 1; i >= 0; i--) {
+                rings[i].scale += 0.2; rings[i].opacity -= 0.03;
+                rings[i].mesh.scale.set(rings[i].scale, rings[i].scale, rings[i].scale);
+                rings[i].mesh.material.opacity = Math.max(0, rings[i].opacity);
+                if (rings[i].opacity <= 0) { scene.remove(rings[i].mesh); rings.splice(i, 1); }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        resetGameData();
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+
+</html>

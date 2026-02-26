@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>3D Planet Fighter - Fixed & Polished Edition</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #000;
+            touch-action: none;
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #ffcc00;
+            text-align: center;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 10;
+        }
+
+        h1 {
+            font-size: 48px;
+            text-shadow: 3px 3px 0px #ff4444;
+            margin-bottom: 10px;
+        }
+
+        button {
+            padding: 15px 30px;
+            font-size: 20px;
+            background: #ffcc00;
+            border: none;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: bold;
+            margin-top: 20px;
+        }
+
+        button:hover {
+            background: #fff;
+        }
+
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #ffcc00;
+            font-size: 20px;
+            pointer-events: none;
+            text-shadow: 2px 2px 4px #000;
+            z-index: 5;
+            display: none;
+        }
+
+        #timer-warning {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ff4444;
+            font-size: 80px;
+            font-weight: bold;
+            pointer-events: none;
+            text-shadow: 0 0 20px #000;
+            z-index: 6;
+            display: none;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui"></div>
+    <div id="timer-warning"></div>
+
+    <div id="screen-title" class="overlay">
+        <h1>PLANET FIGHTER</h1>
+        <p>TIME LIMIT: 3:00 (REAL-TIME) | MISSION: DESTROY 3 RED BASES</p>
+        <button onclick="changeState('PREP')">START MISSION</button>
+    </div>
+
+    <div id="screen-prep" class="overlay hidden">
+        <h1>PREPARING...</h1>
+        <p id="prep-status">SYNCING SYSTEMS WITH PLANET ORBIT</p>
+        <button id="btn-go" class="hidden" onclick="changeState('GAME')">GO!</button>
+    </div>
+
+    <div id="screen-gameover" class="overlay hidden">
+        <h1 id="gameover-title">MISSION FAILED</h1>
+        <p id="gameover-score"></p>
+        <button onclick="changeState('TITLE')">BACK TO BASE</button>
+    </div>
+
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        const GameState = { TITLE: 'TITLE', PREP: 'PREP', GAME: 'GAME', GAMEOVER: 'GAMEOVER' };
+        let currentState = GameState.TITLE;
+
+        const PLANET_RADIUS = 100;
+        const SHIP_SIZE = 3.75;
+        const ALTITUDE = 2;
+        const BASE_RADIUS = 3;
+        const BASE_HEIGHT = 5;
+        const MAX_POOL_BULLETS = 8;
+        const TIME_LIMIT = 180;
+
+        let maxSimultaneousBullets = 4;
+        const FORWARD_SPEED = 0.001875;
+        const MAX_TURN_SPEED = 0.016;
+        const TURN_SPRING = 0.12;   // バネの強さ
+        const TURN_DAMPING = 0.82;  // 減衰
+        const BULLET_SPEED = 0.01;
+
+        let playerHP = 100;
+        let timeLeft = TIME_LIMIT;
+        let currentTurnVelocity = 0;
+        let turnSpringVelocity = 0;
+        let bases = [];
+        let particles = [];
+        let rings = [];
+        let items = [];
+
+        const clock = new THREE.Clock();
+        const scene = new THREE.Scene();
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+        const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+        sunLight.position.set(100, 100, 50);
+        scene.add(sunLight);
+
+        // --- 惑星生成（海 6 : 陸 4 調整版） ---
+        function createAdvancedTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512; canvas.height = 256;
+            const ctx = canvas.getContext('2d');
+            const imgData = ctx.createImageData(canvas.width, canvas.height);
+            const random = (ix, iy) => (Math.sin(ix * 12.9898 + iy * 78.233) * 43758.5453) % 1;
+            const valueNoise = (x, y) => {
+                const ix = Math.floor(x), iy = Math.floor(y);
+                const fx = x - ix, fy = y - iy;
+                const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+                const v00 = Math.abs(random(ix, iy)), v10 = Math.abs(random(ix + 1, iy));
+                const v01 = Math.abs(random(ix, iy + 1)), v11 = Math.abs(random(ix + 1, iy + 1));
+                return v00 + sx * (v10 - v00) + sy * (v01 - v00 + sx * (v11 - v01 - v10 + v00));
+            };
+            for (let y = 0; y < canvas.height; y++) {
+                for (let x = 0; x < canvas.width; x++) {
+                    let n = 0, amp = 1, freq = 0.015, maxV = 0;
+                    for (let i = 0; i < 5; i++) { n += valueNoise(x * freq, y * freq) * amp; maxV += amp; amp *= 0.5; freq *= 2.0; }
+                    n /= maxV;
+                    const threshold = 0.6; // 海 6 : 陸 4
+                    let r, g, b;
+                    if (n > threshold) {
+                        const h = (n - threshold) / (1.0 - threshold);
+                        r = 120 + h * 40; g = 90 + h * 50; b = 50 + h * 20;
+                    } else {
+                        const d = n / threshold;
+                        r = 10 + d * 20; g = 30 + d * 40; b = 100 + d * 80;
+                    }
+                    const distToPole = Math.min(y, canvas.height - y);
+                    if (distToPole < 20) {
+                        const lerp = Math.pow(1 - (distToPole / 20), 3);
+                        r += (255 - r) * lerp; g += (255 - g) * lerp; b += (255 - b) * lerp;
+                    }
+                    const idx = (x + y * canvas.width) * 4;
+                    imgData.data[idx] = r; imgData.data[idx + 1] = g; imgData.data[idx + 2] = b; imgData.data[idx + 3] = 255;
+                }
+            }
+            ctx.putImageData(imgData, 0, 0);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        const planet = new THREE.Mesh(
+            new THREE.SphereGeometry(PLANET_RADIUS, 32, 24),
+            new THREE.MeshStandardMaterial({ map: createAdvancedTexture(), roughness: 0.8, flatShading: true })
+        );
+        scene.add(planet);
+
+        const shipGroup = new THREE.Group();
+        const shipMesh = new THREE.Mesh(
+            new THREE.ConeGeometry(1.5, SHIP_SIZE, 5).rotateX(Math.PI / 2),
+            new THREE.MeshStandardMaterial({ color: 0xffcc00, flatShading: true })
+        );
+        shipGroup.add(shipMesh);
+        scene.add(shipGroup);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 30, 0); camera.up.set(0, 0, 1); camera.lookAt(0, 0, 10);
+        shipGroup.add(camera);
+
+        const bulletPool = [];
+        for (let i = 0; i < MAX_POOL_BULLETS; i++) {
+            const b = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 2, 6).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xffaa00 }));
+            b.visible = false; b.userData = { active: false, distance: 0 };
+            scene.add(b); bulletPool.push(b);
+        }
+
+        window.changeState = function (newState) {
+            currentState = newState;
+            document.querySelectorAll('.overlay').forEach(el => el.classList.add('hidden'));
+            document.getElementById('ui').style.display = 'none';
+            document.getElementById('timer-warning').style.display = 'none';
+
+            if (newState === GameState.TITLE) {
+                document.getElementById('screen-title').classList.remove('hidden');
+                resetGameData();
+            } else if (newState === GameState.PREP) {
+                document.getElementById('screen-prep').classList.remove('hidden');
+                setTimeout(() => document.getElementById('btn-go').classList.remove('hidden'), 1000);
+            } else if (newState === GameState.GAME) {
+                document.getElementById('ui').style.display = 'block';
+                clock.start();
+            } else if (newState === GameState.GAMEOVER) {
+                document.getElementById('screen-gameover').classList.remove('hidden');
+            }
+        };
+
+        function resetGameData() {
+            playerHP = 100; timeLeft = TIME_LIMIT; maxSimultaneousBullets = 4;
+            currentTurnVelocity = 0; turnSpringVelocity = 0;
+            bases.forEach(b => { scene.remove(b); b.geometry.dispose(); b.material.dispose(); });
+            items.forEach(i => { scene.remove(i); i.geometry.dispose(); i.material.dispose(); });
+            bases = []; items = [];
+            createBases(); createItems();
+            shipGroup.quaternion.set(0, 0, 0, 1);
+            shipGroup.position.set(0, PLANET_RADIUS + ALTITUDE, 0);
+        }
+
+        function createBases() {
+            for (let i = 0; i < 4; i++) {
+                const isPlayer = (i === 0);
+                const base = new THREE.Mesh(
+                    new THREE.CylinderGeometry(BASE_RADIUS, BASE_RADIUS, BASE_HEIGHT, 8),
+                    new THREE.MeshStandardMaterial({ color: isPlayer ? 0xffcc00 : 0xff4444, flatShading: true })
+                );
+                let pos;
+                do {
+                    const phi = Math.acos(2 * Math.random() - 1);
+                    const theta = 2 * Math.PI * Math.random();
+                    pos = new THREE.Vector3().setFromSphericalCoords(PLANET_RADIUS, phi, theta);
+                } while (pos.distanceTo(new THREE.Vector3(0, PLANET_RADIUS, 0)) < 60);
+                base.position.copy(pos);
+                const normal = pos.clone().normalize();
+                base.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
+                base.position.add(normal.clone().multiplyScalar(BASE_HEIGHT * 0.4));
+                base.userData = { hp: 8, active: true, dying: false, isPlayer, normal, origin: base.position.clone(), sink: 0, tilted: false };
+                scene.add(base); bases.push(base);
+            }
+        }
+
+        function createItems() {
+            for (let i = 0; i < 4; i++) {
+                const itemGeo = new THREE.CylinderGeometry(1.5, 1.5, 0.5, 4);
+                itemGeo.rotateY(Math.PI / 4); itemGeo.rotateX(Math.PI / 2);
+                const item = new THREE.Mesh(itemGeo, new THREE.MeshBasicMaterial({ color: 0x00ffff }));
+                let pos;
+                do {
+                    const phi = Math.acos(2 * Math.random() - 1);
+                    const theta = 2 * Math.PI * Math.random();
+                    pos = new THREE.Vector3().setFromSphericalCoords(PLANET_RADIUS + ALTITUDE, phi, theta);
+                } while (pos.distanceTo(new THREE.Vector3(0, PLANET_RADIUS + ALTITUDE, 0)) < 40);
+                item.position.copy(pos);
+                item.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), pos.clone().normalize());
+                item.userData = { active: true }; scene.add(item); items.push(item);
+            }
+        }
+
+        function spawnParticles(pos, color, count, speed, life) {
+            for (let i = 0; i < count; i++) {
+                const p = new THREE.Mesh(new THREE.SphereGeometry(0.3, 4, 4), new THREE.MeshBasicMaterial({ color: color }));
+                p.position.copy(pos);
+                particles.push({ mesh: p, vel: new THREE.Vector3((Math.random() - 0.5) * speed, (Math.random() - 0.5) * speed, (Math.random() - 0.5) * speed), life: life });
+                scene.add(p);
+            }
+        }
+
+        function spawnRing(pos, color) {
+            const ring = new THREE.Mesh(new THREE.TorusGeometry(BASE_RADIUS * 0.1, 0.05, 4, 12), new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 1.0 }));
+            const offset = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(2);
+            ring.position.copy(pos).add(offset); ring.lookAt(new THREE.Vector3(0, 0, 0));
+            scene.add(ring); rings.push({ mesh: ring, scale: 1.0, opacity: 1.0 });
+        }
+
+        const keys = {};
+        let isFiring = false, fireTimer = 0;
+        window.onkeydown = e => { keys[e.code] = true; if (e.code === 'Space') isFiring = true; };
+        window.onkeyup = e => { keys[e.code] = false; if (e.code === 'Space') isFiring = false; };
+
+        function updateUI() {
+            if (currentState !== GameState.GAME || bases.length === 0) return;
+
+            const enemyBases = bases.filter(b => !b.userData.isPlayer && b.userData.active).length;
+            const minutes = Math.max(0, Math.floor(timeLeft / 60));
+            const seconds = Math.max(0, Math.floor(timeLeft % 60)).toString().padStart(2, '0');
+
+            document.getElementById('ui').innerHTML = `TIME: ${minutes}:${seconds} | RED BASES: ${enemyBases}/3 LEFT<br>HP: ${Math.max(0, Math.floor(playerHP))}`;
+
+            const warningEl = document.getElementById('timer-warning');
+            if (timeLeft <= 10 && timeLeft > 0) {
+                warningEl.style.display = 'block'; warningEl.innerText = Math.ceil(timeLeft);
+            } else if (timeLeft <= 20 && timeLeft > 10) {
+                warningEl.style.display = 'block'; warningEl.innerText = "HURRY UP!";
+            } else { warningEl.style.display = 'none'; }
+
+            if (enemyBases === 0) {
+                document.getElementById('gameover-title').innerText = "MISSION CLEAR!";
+                document.getElementById('gameover-score').innerText = "All targets eliminated.";
+                changeState(GameState.GAMEOVER);
+            }
+            if (timeLeft <= 0 || playerHP <= 0) {
+                document.getElementById('gameover-title').innerText = "MISSION FAILED";
+                document.getElementById('gameover-score').innerText = timeLeft <= 0 ? "Time is up." : "Fighter destroyed.";
+                changeState(GameState.GAMEOVER);
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+            planet.rotateY(0.0005);
+
+            if (currentState === GameState.GAME) {
+                timeLeft -= delta;
+                updateUI();
+
+                // 旋回慣性とオーバシュート
+                let targetTurn = (keys['ArrowLeft'] || keys['KeyA'] ? MAX_TURN_SPEED : 0) + (keys['ArrowRight'] || keys['KeyD'] ? -MAX_TURN_SPEED : 0);
+                turnSpringVelocity += (targetTurn - currentTurnVelocity) * TURN_SPRING;
+                turnSpringVelocity *= TURN_DAMPING;
+                currentTurnVelocity += turnSpringVelocity;
+
+                shipGroup.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), currentTurnVelocity));
+                shipGroup.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), FORWARD_SPEED));
+                shipGroup.position.copy(new THREE.Vector3(0, PLANET_RADIUS + ALTITUDE, 0)).applyQuaternion(shipGroup.quaternion);
+                shipMesh.rotation.z = -currentTurnVelocity * 15;
+
+                // 弾丸発射（フリーズ防止のため独立してタイマー管理）
+                if (fireTimer > 0) fireTimer--;
+                if (isFiring && fireTimer <= 0) {
+                    const activeCount = bulletPool.filter(b => b.userData.active).length;
+                    if (activeCount < maxSimultaneousBullets) {
+                        const b = bulletPool.find(b => !b.userData.active);
+                        if (b) {
+                            b.visible = true; b.userData.active = true; b.userData.distance = 0;
+                            b.quaternion.copy(shipGroup.quaternion);
+                            fireTimer = 20;
+                        }
+                    }
+                }
+
+                bulletPool.forEach(b => {
+                    if (!b.userData.active) return;
+                    b.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), BULLET_SPEED));
+                    b.position.copy(new THREE.Vector3(0, PLANET_RADIUS + ALTITUDE, 0)).applyQuaternion(b.quaternion);
+                    bases.forEach(base => {
+                        if (base.userData.active && !base.userData.dying && b.position.distanceTo(base.position) < BASE_RADIUS + 2) {
+                            b.userData.active = false; b.visible = false;
+                            if (!base.userData.isPlayer) {
+                                base.userData.hp--;
+                                spawnParticles(b.position, 0xffaa00, 4, 0.4, 15);
+                                if (base.userData.hp <= 0) base.userData.dying = true;
+                            }
+                        }
+                    });
+                    if ((b.userData.distance += BULLET_SPEED) > Math.PI) { b.userData.active = false; b.visible = false; }
+                });
+
+                bases.forEach(base => {
+                    if (base.userData.dying && !base.userData.tilted) {
+                        base.material.color.lerp(new THREE.Color(0x000000), 0.05);
+                        if (base.userData.sink < BASE_HEIGHT * 0.7) {
+                            base.userData.sink += 0.05;
+                            base.position.copy(base.userData.origin).sub(base.userData.normal.clone().multiplyScalar(base.userData.sink));
+                            if (Math.random() > 0.7) spawnRing(base.position, 0xff8800);
+                        } else {
+                            base.rotateOnAxis(new THREE.Vector3(Math.random(), Math.random(), Math.random()).normalize(), Math.PI / 6);
+                            base.userData.tilted = true; base.userData.active = false;
+                        }
+                    }
+                    if (base.userData.active && !base.userData.dying && !base.userData.isPlayer && shipGroup.position.distanceTo(base.position) < BASE_RADIUS + 2) playerHP -= 0.2;
+                });
+
+                items.forEach(item => {
+                    if (item.userData.active && shipGroup.position.distanceTo(item.position) < 3.5) {
+                        item.userData.active = false; item.visible = false;
+                        maxSimultaneousBullets = Math.min(8, maxSimultaneousBullets + 1);
+                        spawnParticles(item.position, 0x00ffff, 15, 0.8, 30);
+                    }
+                    if (item.userData.active) item.rotateZ(0.02);
+                });
+            }
+
+            for (let i = particles.length - 1; i >= 0; i--) {
+                particles[i].mesh.position.add(particles[i].vel);
+                if (--particles[i].life <= 0) { scene.remove(particles[i].mesh); particles.splice(i, 1); }
+            }
+            for (let i = rings.length - 1; i >= 0; i--) {
+                rings[i].scale += 0.15; rings[i].opacity -= 0.04;
+                rings[i].mesh.scale.set(rings[i].scale, rings[i].scale, rings[i].scale);
+                rings[i].mesh.material.opacity = Math.max(0, rings[i].opacity);
+                if (rings[i].opacity <= 0) { scene.remove(rings[i].mesh); rings.splice(i, 1); }
+            }
+            renderer.render(scene, camera);
+        }
+
+        resetGameData();
+        animate();
+        window.onresize = () => { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); };
+    </script>
+</body>
+
+</html>
