@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>3D Tower Builder - Physics Refined</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #001;
+            font-family: monospace;
+            touch-action: none;
+            user-select: none;
+        }
+
+        #ui {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            pointer-events: none;
+            text-align: right;
+            z-index: 10;
+        }
+
+        .stat {
+            color: #fff;
+            font-size: 24px;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px #000;
+        }
+
+        #next-ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 100px;
+            height: 100px;
+            background: rgba(0, 0, 0, 0.4);
+            border: 2px solid #555;
+            color: #fff;
+            font-weight: bold;
+            text-align: center;
+            z-index: 10;
+            cursor: pointer;
+            /* クリック可能であることを明示 */
+        }
+
+        #next-label {
+            font-size: 12px;
+            margin-top: 5px;
+        }
+
+        #msg {
+            position: absolute;
+            width: 100%;
+            text-align: center;
+            top: 50%;
+            color: #fff;
+            font-size: 1.5em;
+            pointer-events: none;
+            z-index: 10;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px #000;
+        }
+
+        #combo {
+            position: absolute;
+            width: 100%;
+            text-align: center;
+            top: 35%;
+            color: #ffcc00;
+            font-size: 3em;
+            font-weight: bold;
+            text-shadow: 0 0 15px rgba(255, 204, 0, 0.9);
+            pointer-events: none;
+            z-index: 20;
+            display: none;
+            transition: opacity 0.5s;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        <div id="floorDisplay" class="stat">1F</div>
+    </div>
+    <div id="next-ui">
+        <div id="next-label">NEXT</div>
+        <canvas id="nextCanvas" width="100" height="80"></canvas>
+    </div>
+    <div id="msg">TAP TO START<br>SWIPE TO ROTATE & DROP</div>
+    <div id="combo">FLOOR UP!</div>
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        const CONFIG = {
+            W: 2, D: 2, H: 512,
+            SPEED_BASE: 0.0075,
+            SPEED_DOWN: 0.2,
+            CAMERA_ROT_SPEED: 0.001,
+            ROTATION_LERP: 0.25,
+            COLORS: { NORMAL: 0x3498db, SOLID: 0x888888, AXIS: 0x555555, STACKED: 0x2980b9, CITY: 0x2c3e50, GRASS: 0x27ae60, ROAD: 0x111111 }
+        };
+
+        let scene, camera, renderer, field = [];
+        let nextScene, nextCamera, nextRenderer;
+        let gameState = 'TITLE';
+        let floorHeight = 0, visualCameraY = 0, cameraAngle = 0, rotDir = 1, currentPiece = null, nextPieceData = null, isProcessing = false;
+        let startX = 0, startY = 0, isSwiping = false;
+        let clouds = [], gameOverFrame;
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0a0a20);
+            scene.fog = new THREE.FogExp2(0x0a0a20, 0.015);
+
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 2000);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            nextScene = new THREE.Scene();
+            nextCamera = new THREE.PerspectiveCamera(50, 100 / 80, 0.1, 10);
+            nextCamera.position.set(2.5, 2.5, 2.5);
+            nextCamera.lookAt(0.5, 0.5, 0.5);
+            nextRenderer = new THREE.WebGLRenderer({ canvas: document.getElementById('nextCanvas'), antialias: true, alpha: true });
+            nextScene.add(new THREE.AmbientLight(0xffffff, 1));
+
+            scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+            dirLight.position.set(30, 100, 30);
+            scene.add(dirLight);
+
+            const axisGeo = new THREE.CylinderGeometry(0.18, 0.18, CONFIG.H, 12);
+            const axisMat = new THREE.MeshPhongMaterial({ color: CONFIG.COLORS.AXIS, transparent: true, opacity: 0.4 });
+            const axis = new THREE.Mesh(axisGeo, axisMat);
+            axis.position.y = CONFIG.H / 2 - 1;
+            scene.add(axis);
+
+            const redEdges = new THREE.EdgesGeometry(new THREE.PlaneGeometry(2, 2));
+            const redMat = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 2 });
+            gameOverFrame = new THREE.LineSegments(redEdges, redMat);
+            gameOverFrame.rotation.x = -Math.PI / 2;
+            scene.add(gameOverFrame);
+
+            createCity();
+            createClouds();
+
+            for (let y = 0; y < CONFIG.H; y++) field[y] = Array.from({ length: CONFIG.W }, () => Array(CONFIG.D).fill(null));
+            for (let x = 0; x < CONFIG.W; x++) for (let z = 0; z < CONFIG.D; z++) addBlockToField(x, 0, z, true);
+
+            nextPieceData = generatePieceData();
+            updateNextDisplay();
+            animate();
+        }
+
+        function createCity() {
+            const cityGroup = new THREE.Group();
+            const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+            const gridSize = 7, range = 100, scaleFactor = 0.75;
+            for (let x = -range; x <= range; x += gridSize) {
+                for (let z = -range; z <= range; z += gridSize) {
+                    const dist = Math.sqrt(x * x + z * z);
+                    if (dist < 8) continue;
+                    const ox = (Math.random() - 0.5) * 4, oz = (Math.random() - 0.5) * 4;
+                    if (Math.random() > 0.4) {
+                        const road = new THREE.Mesh(new THREE.PlaneGeometry((Math.random() > 0.8 ? 2 : 0.8) * scaleFactor, gridSize), new THREE.MeshPhongMaterial({ color: CONFIG.COLORS.ROAD }));
+                        road.rotation.x = -Math.PI / 2;
+                        road.position.set(x + ox + gridSize / 2, -0.99, z + oz);
+                        cityGroup.add(road);
+                    }
+                    const typeRand = Math.random();
+                    if (typeRand < 0.2) {
+                        const park = new THREE.Mesh(new THREE.PlaneGeometry((2 + Math.random() * 4) * scaleFactor, (2 + Math.random() * 4) * scaleFactor), new THREE.MeshPhongMaterial({ color: CONFIG.COLORS.GRASS }));
+                        park.rotation.x = -Math.PI / 2;
+                        park.position.set(x + ox, -0.98, z + oz);
+                        cityGroup.add(park);
+                    } else if (typeRand > 0.4) {
+                        const h = (Math.random() < 0.05 ? (40 + Math.random() * 50) : (2 + Math.random() * 12)) * scaleFactor;
+                        const b = new THREE.Mesh(boxGeo, new THREE.MeshPhongMaterial({ color: CONFIG.COLORS.CITY }));
+                        b.position.set(x + ox, h / 2 - 1, z + oz);
+                        b.scale.set((Math.random() < 0.15 ? 4 : 2) * scaleFactor, h, (Math.random() < 0.15 ? 4 : 2) * scaleFactor);
+                        cityGroup.add(b);
+                    }
+                }
+            }
+            scene.add(cityGroup);
+        }
+
+        function createClouds() {
+            const cloudGeo = new THREE.SphereGeometry(1, 6, 6);
+            const cloudMat = new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.1 });
+            for (let i = 0; i < 50; i++) {
+                const group = new THREE.Group();
+                for (let j = 0; j < 3; j++) {
+                    const part = new THREE.Mesh(cloudGeo, cloudMat);
+                    part.position.set(j * 1.5, Math.random(), Math.random());
+                    part.scale.set(5, 1.2, 2.5);
+                    group.add(part);
+                }
+                const r = 50 + Math.random() * 150, ang = Math.random() * Math.PI * 2;
+                group.position.set(Math.cos(ang) * r, 80 + Math.random() * 400, Math.sin(ang) * r);
+                group.userData = { speed: 0.0005, angle: ang, radius: r };
+                clouds.push(group);
+                scene.add(group);
+            }
+        }
+
+        function addBlockToField(x, y, z, isSolid = false) {
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.96, 0.96), new THREE.MeshPhongMaterial({ color: isSolid ? CONFIG.COLORS.SOLID : CONFIG.COLORS.STACKED }));
+            mesh.position.set(x - 0.5, y, z - 0.5);
+            scene.add(mesh);
+            field[y][x][z] = mesh;
+            mesh.userData.isSolid = isSolid;
+        }
+
+        function generatePieceData() {
+            let blocks = [], candidates = [];
+            for (let ry = 0; ry < 2; ry++) for (let rx = 0; rx < 2; rx++) for (let rz = 0; rz < 2; rz++) candidates.push({ rx, ry, rz });
+            const rand = Math.random();
+            let count = (rand < 0.1) ? 1 : (rand < 0.2 ? 4 : (rand < 0.5 ? 2 : 3));
+
+            // 1F〜4F(floorHeightが0〜3)は難易度を下げて2個以下にする
+            if (floorHeight < 4) {
+                count = (rand < 0.5) ? 1 : 2;
+            }
+
+            for (let i = 0; i < count; i++) blocks.push(candidates.splice(Math.floor(Math.random() * candidates.length), 1)[0]);
+
+            if (blocks.length > 1) {
+                const visited = new Set(), queue = [blocks[0]]; visited.add(0);
+                let connectedCount = 1;
+                while (queue.length > 0) {
+                    const b = queue.shift();
+                    blocks.forEach((other, idx) => {
+                        if (!visited.has(idx) && (Math.abs(b.rx - other.rx) + Math.abs(b.ry - other.ry) + Math.abs(b.rz - other.rz) === 1)) {
+                            visited.add(idx); queue.push(other); connectedCount++;
+                        }
+                    });
+                }
+                if (connectedCount !== blocks.length) return generatePieceData();
+            }
+
+            // 下列にブロックがない状態を防ぐ
+            const hasBottom = blocks.some(b => b.ry === 0);
+            if (!hasBottom) {
+                blocks.forEach(b => b.ry = 0);
+            }
+
+            return blocks;
+        }
+
+        function updateNextDisplay() {
+            while (nextScene.children.length > 1) nextScene.remove(nextScene.children[1]);
+            const group = new THREE.Group();
+            nextPieceData.forEach(b => {
+                const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.8, 0.8), new THREE.MeshPhongMaterial({ color: CONFIG.COLORS.NORMAL }));
+                mesh.position.set(b.rx, b.ry, b.rz);
+                group.add(mesh);
+                const line = new THREE.LineSegments(
+                    new THREE.EdgesGeometry(new THREE.BoxGeometry(0.82, 0.82, 0.82)),
+                    new THREE.LineBasicMaterial({ color: 0xffffff })
+                );
+                line.position.set(b.rx, b.ry, b.rz);
+                group.add(line);
+            });
+            nextScene.add(group);
+        }
+
+        function spawnPiece() {
+            if (isProcessing || gameState !== 'PLAYING') return;
+            const blocks = nextPieceData;
+            nextPieceData = generatePieceData();
+            updateNextDisplay();
+            // 入れ替え時のアニメーション用にscaleプロパティを追加
+            const p = { pos: { x: 0, y: floorHeight + 10.5, z: 0 }, blocks, meshes: [], outlines: [], fallSpeed: CONFIG.SPEED_BASE, visualAngle: 0, targetAngle: 0, scale: 1 };
+            if (checkCollision(0, 0, 0, p.blocks, p.pos)) {
+                gameState = 'GAMEOVER';
+                document.getElementById('msg').innerHTML = "GAME OVER<br>TAP TO RESTART";
+                document.getElementById('msg').style.display = 'block';
+                return;
+            }
+            const guideFrame = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(2, 2, 2)), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.3 }));
+            scene.add(guideFrame);
+            p.guideFrame = guideFrame;
+            p.blocks.forEach(() => {
+                const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.96, 0.96), new THREE.MeshPhongMaterial({ color: CONFIG.COLORS.NORMAL }));
+                scene.add(mesh); p.meshes.push(mesh);
+                const line = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1.01, 1.01, 1.01)), new THREE.LineBasicMaterial({ color: 0xffffff }));
+                scene.add(line); p.outlines.push(line);
+            });
+            currentPiece = p;
+        }
+
+        // NEXTブロックと現在の落下ブロックを入れ替える機能
+        async function swapPiece() {
+            if (isProcessing || gameState !== 'PLAYING' || !currentPiece) return;
+            isProcessing = true; // アニメーション中は他の操作をロック
+
+            const duration = 200, start = performance.now();
+            const nextCanvas = document.getElementById('nextCanvas');
+
+            // 縮小アニメーション
+            while (performance.now() - start < duration) {
+                const p = 1 - (performance.now() - start) / duration;
+                currentPiece.scale = p;
+                nextCanvas.style.transform = `scale(${p})`;
+                await new Promise(r => requestAnimationFrame(r));
+            }
+
+            // データの入れ替え
+            const tempBlocks = currentPiece.blocks;
+            currentPiece.blocks = nextPieceData;
+            nextPieceData = tempBlocks;
+
+            // 現在のメッシュを破棄
+            currentPiece.meshes.forEach(m => scene.remove(m));
+            currentPiece.outlines.forEach(m => scene.remove(m));
+            scene.remove(currentPiece.guideFrame);
+
+            // 状態のリセット（上部から落とし直す）
+            currentPiece.meshes = [];
+            currentPiece.outlines = [];
+            currentPiece.pos.y = floorHeight + 10.5;
+            currentPiece.visualAngle = 0;
+            currentPiece.targetAngle = 0;
+            currentPiece.scale = 0;
+
+            // メッシュの再生成
+            const guideFrame = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(2, 2, 2)), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.3 }));
+            scene.add(guideFrame);
+            currentPiece.guideFrame = guideFrame;
+
+            currentPiece.blocks.forEach(() => {
+                const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.96, 0.96), new THREE.MeshPhongMaterial({ color: CONFIG.COLORS.NORMAL }));
+                scene.add(mesh); currentPiece.meshes.push(mesh);
+                const line = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1.01, 1.01, 1.01)), new THREE.LineBasicMaterial({ color: 0xffffff }));
+                scene.add(line); currentPiece.outlines.push(line);
+            });
+
+            updateNextDisplay();
+
+            // 万が一、上部でいきなり衝突していたらゲームオーバー
+            if (checkCollision(0, 0, 0)) {
+                gameState = 'GAMEOVER';
+                document.getElementById('msg').innerHTML = "GAME OVER<br>TAP TO RESTART";
+                document.getElementById('msg').style.display = 'block';
+                isProcessing = false;
+                return;
+            }
+
+            // 拡大アニメーション
+            const start2 = performance.now();
+            while (performance.now() - start2 < duration) {
+                const p = (performance.now() - start2) / duration;
+                currentPiece.scale = p;
+                nextCanvas.style.transform = `scale(${p})`;
+                await new Promise(r => requestAnimationFrame(r));
+            }
+
+            currentPiece.scale = 1;
+            nextCanvas.style.transform = `scale(1)`;
+            isProcessing = false;
+        }
+
+        function checkCollision(dx, dy, dz, nextBlocks = null, customPos = null) {
+            const p = customPos || currentPiece.pos, blocks = nextBlocks || currentPiece.blocks;
+            for (let b of blocks) {
+                let nx = (p.x + b.rx + dx) % 2; if (nx < 0) nx += 2;
+                let nz = (p.z + b.rz + dz) % 2; if (nz < 0) nz += 2;
+                let ny_check = Math.floor(p.y + b.ry + dy + 0.01);
+                if (ny_check < 0 || (ny_check < CONFIG.H && field[ny_check][nx][nz])) return true;
+            }
+            return false;
+        }
+
+        async function settle() {
+            const py = Math.round(currentPiece.pos.y);
+            currentPiece.blocks.forEach((b, i) => {
+                let tx = (currentPiece.pos.x + b.rx) % 2; if (tx < 0) tx += 2;
+                let tz = (currentPiece.pos.z + b.rz) % 2; if (tz < 0) tz += 2;
+                const finalY = py + b.ry;
+                if (finalY < CONFIG.H) {
+                    field[finalY][tx][tz] = currentPiece.meshes[i];
+                    field[finalY][tx][tz].position.set(tx - 0.5, finalY, tz - 0.5);
+                    field[finalY][tx][tz].rotation.set(0, 0, 0);
+                    field[finalY][tx][tz].material.color.set(CONFIG.COLORS.STACKED);
+                    field[finalY][tx][tz].userData.isSolid = false;
+                }
+                scene.remove(currentPiece.outlines[i]);
+            });
+            scene.remove(currentPiece.guideFrame);
+            currentPiece = null;
+            await processGameLogic();
+            spawnPiece();
+        }
+
+        function rotatePiece(direction = 1) {
+            if (!currentPiece || isProcessing) return;
+            const nextBlocks = currentPiece.blocks.map(b => ({ rx: (direction === 1) ? b.rz : 1 - b.rz, ry: b.ry, rz: (direction === 1) ? 1 - b.rx : b.rx }));
+            if (!checkCollision(0, 0, 0, nextBlocks)) {
+                currentPiece.blocks = nextBlocks;
+                currentPiece.targetAngle += (direction === 1 ? -Math.PI / 2 : Math.PI / 2);
+            }
+        }
+
+        async function processGameLogic() {
+            isProcessing = true;
+            let needsRecheck = true;
+
+            while (needsRecheck) {
+                needsRecheck = false;
+
+                // 1. コンクリート化
+                let checkY = floorHeight + 1;
+                while (checkY < CONFIG.H) {
+                    if (field[checkY][0][0] && field[checkY][1][0] && field[checkY][1][1] && field[checkY][0][1]) {
+                        let hasStacked = false;
+                        for (let x = 0; x < 2; x++) for (let z = 0; z < 2; z++) if (!field[checkY][x][z].userData.isSolid) hasStacked = true;
+
+                        if (hasStacked) {
+                            floorHeight = checkY;
+                            showStatus("FLOOR UP!", 0xaaaaaa); // 文言を変更
+                            const startY = visualCameraY, targetY = floorHeight, duration = 1000, startTime = performance.now();
+                            const startColor = new THREE.Color(CONFIG.COLORS.STACKED), endColor = new THREE.Color(CONFIG.COLORS.SOLID);
+                            while (performance.now() - startTime < duration) {
+                                const progress = (performance.now() - startTime) / duration;
+                                visualCameraY = startY + (targetY - startY) * progress;
+                                const currentColor = startColor.clone().lerp(endColor, progress);
+                                for (let x = 0; x < 2; x++) for (let z = 0; z < 2; z++) field[checkY][x][z].material.color.copy(currentColor);
+                                await new Promise(r => requestAnimationFrame(r));
+                            }
+                            for (let x = 0; x < 2; x++) for (let z = 0; z < 2; z++) {
+                                field[checkY][x][z].material.color.set(CONFIG.COLORS.SOLID);
+                                field[checkY][x][z].userData.isSolid = true;
+                            }
+                            rotDir *= -1;
+                            needsRecheck = true;
+                        }
+                        checkY++;
+                    } else break;
+                }
+
+                // 2. 消滅フロアチェック
+                let searchY = floorHeight + 1;
+                while (searchY < CONFIG.H) {
+                    if (field[searchY][0][0] && field[searchY][1][0] && field[searchY][1][1] && field[searchY][0][1]) {
+                        // 消滅演出
+                        const targets = [];
+                        for (let x = 0; x < 2; x++) for (let z = 0; z < 2; z++) targets.push(field[searchY][x][z]);
+                        const clearDuration = 500, clearStart = performance.now();
+                        while (performance.now() - clearStart < clearDuration) {
+                            const p = (performance.now() - clearStart) / clearDuration;
+                            for (let t of targets) { t.material.emissive.set(0xffffff); t.material.emissiveIntensity = p * 2; }
+                            await new Promise(r => requestAnimationFrame(r));
+                        }
+
+                        // 消滅したフロアより上のブロックに「落下可能」フラグを付与
+                        for (let fy = searchY + 1; fy < CONFIG.H; fy++) {
+                            for (let fx = 0; fx < 2; fx++) {
+                                for (let fz = 0; fz < 2; fz++) {
+                                    if (field[fy][fx][fz]) field[fy][fx][fz].userData.mayFall = true;
+                                }
+                            }
+                        }
+
+                        // 消滅処理
+                        for (let x = 0; x < 2; x++) for (let z = 0; z < 2; z++) {
+                            scene.remove(field[searchY][x][z]);
+                            field[searchY][x][z] = null;
+                        }
+
+                        // 個別ブロック落下物理
+                        let movedAnyBlock = true;
+                        while (movedAnyBlock) {
+                            movedAnyBlock = false;
+                            const currentFalling = [];
+                            for (let fy = 1; fy < CONFIG.H; fy++) {
+                                for (let fx = 0; fx < 2; fx++) {
+                                    for (let fz = 0; fz < 2; fz++) {
+                                        const block = field[fy][fx][fz];
+                                        if (block && block.userData.mayFall && !field[fy - 1][fx][fz]) {
+                                            currentFalling.push({ mesh: block, fromY: fy, toY: fy - 1 });
+                                            field[fy - 1][fx][fz] = block;
+                                            field[fy][fx][fz] = null;
+                                            movedAnyBlock = true;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (currentFalling.length > 0) {
+                                const fallDuration = 250;
+                                const fallStart = performance.now();
+                                while (performance.now() - fallStart < fallDuration) {
+                                    const progress = (performance.now() - fallStart) / fallDuration;
+                                    currentFalling.forEach(fb => { fb.mesh.position.y = fb.fromY - progress; });
+                                    await new Promise(r => requestAnimationFrame(r));
+                                }
+                                currentFalling.forEach(fb => fb.mesh.position.y = fb.toY);
+                            }
+                        }
+
+                        scene.traverse(obj => { if (obj.userData) delete obj.userData.mayFall; });
+                        needsRecheck = true;
+                        break;
+                    }
+                    searchY++;
+                    let floorEmpty = true;
+                    if (searchY < CONFIG.H) {
+                        for (let x = 0; x < 2; x++) for (let z = 0; z < 2; z++) if (field[searchY][x][z]) floorEmpty = false;
+                    }
+                    if (floorEmpty) break;
+                }
+            }
+            document.getElementById('floorDisplay').innerText = (floorHeight + 1) + "F";
+            isProcessing = false;
+        }
+
+        function showStatus(text, color) {
+            const el = document.getElementById('combo');
+            el.innerText = text; el.style.color = "#" + color.toString(16).padStart(6, '0');
+            el.style.display = 'block'; el.style.opacity = '1';
+            clearTimeout(el.timer);
+            el.timer = setTimeout(() => { el.style.opacity = '0'; setTimeout(() => { if (el.style.opacity === '0') el.style.display = 'none'; }, 400); }, 600);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            clouds.forEach(c => {
+                c.userData.angle += c.userData.speed;
+                c.position.x = Math.cos(c.userData.angle) * c.userData.radius;
+                c.position.z = Math.sin(c.userData.angle) * c.userData.radius;
+            });
+
+            if (!isProcessing) cameraAngle += CONFIG.CAMERA_ROT_SPEED * rotDir;
+            gameOverFrame.position.y = visualCameraY + 9.5;
+
+            if (gameState === 'PLAYING' && !isProcessing && currentPiece) {
+                if (!checkCollision(0, -currentPiece.fallSpeed, 0)) currentPiece.pos.y -= currentPiece.fallSpeed;
+                else settle();
+                if (currentPiece) {
+                    currentPiece.visualAngle += (currentPiece.targetAngle - currentPiece.visualAngle) * CONFIG.ROTATION_LERP;
+                    const diff = currentPiece.visualAngle - currentPiece.targetAngle, dCos = Math.cos(diff), dSin = Math.sin(diff);
+                    currentPiece.guideFrame.position.set(0, currentPiece.pos.y + 0.5, 0);
+                    currentPiece.guideFrame.rotation.y = -diff; // 外枠の回転を反転させてブロックに合わせる
+
+                    // スケールは入れ替えアニメーション時にも適用される
+                    currentPiece.blocks.forEach((b, i) => {
+                        const rx = (b.rx - 0.5) * dCos - (b.rz - 0.5) * dSin, rz = (b.rx - 0.5) * dSin + (b.rz - 0.5) * dCos;
+                        const px = rx, py = currentPiece.pos.y + b.ry, pz = rz;
+                        currentPiece.meshes[i].position.set(px, py, pz);
+                        currentPiece.meshes[i].scale.set(currentPiece.scale, currentPiece.scale, currentPiece.scale);
+                        currentPiece.outlines[i].position.set(px, py, pz);
+                        currentPiece.outlines[i].scale.set(currentPiece.scale, currentPiece.scale, currentPiece.scale);
+                    });
+                }
+            }
+            camera.position.set(Math.sin(cameraAngle) * 8.5, visualCameraY + 10, Math.cos(cameraAngle) * 8.5);
+            camera.lookAt(0, visualCameraY + 4, 0);
+            renderer.render(scene, camera);
+            nextRenderer.render(nextScene, nextCamera);
+        }
+
+        const onInputStart = (x, y) => {
+            if (isProcessing) return;
+            if (gameState === 'TITLE') { gameState = 'PLAYING'; document.getElementById('msg').style.display = 'none'; spawnPiece(); }
+            else if (gameState === 'GAMEOVER') location.reload();
+            startX = x; startY = y;
+        };
+        const onInputMove = (x, y) => {
+            if (gameState !== 'PLAYING' || !currentPiece || isProcessing) return;
+            if (y - startY > 40) { currentPiece.fallSpeed = CONFIG.SPEED_DOWN; isSwiping = true; }
+        };
+        const onInputEnd = (x, y) => {
+            if (gameState !== 'PLAYING' || isProcessing) return;
+            if (currentPiece) currentPiece.fallSpeed = CONFIG.SPEED_BASE;
+            const dx = x - startX, dy = y - startY;
+            if (Math.abs(dx) > 30 && Math.abs(dx) > Math.abs(dy)) rotatePiece(dx < 0 ? 1 : -1);
+            else if (!isSwiping && Math.abs(dx) < 10 && Math.abs(dy) < 10) rotatePiece(1);
+            isSwiping = false;
+        };
+
+        // NEXT入れ替え用のイベントリスナー（メイン画面のクリック反応を止めるため stopPropagation します）
+        const nextUi = document.getElementById('next-ui');
+        nextUi.addEventListener('mousedown', e => { e.stopPropagation(); swapPiece(); });
+        nextUi.addEventListener('touchstart', e => { e.stopPropagation(); e.preventDefault(); swapPiece(); }, { passive: false });
+
+        window.addEventListener('mousedown', e => onInputStart(e.clientX, e.clientY));
+        window.addEventListener('mousemove', e => { if (e.buttons > 0) onInputMove(e.clientX, e.clientY); });
+        window.addEventListener('mouseup', e => onInputEnd(e.clientX, e.clientY));
+        window.addEventListener('touchstart', e => { onInputStart(e.touches[0].clientX, e.touches[0].clientY); e.preventDefault(); }, { passive: false });
+        window.addEventListener('touchmove', e => { onInputMove(e.touches[0].clientX, e.touches[0].clientY); e.preventDefault(); }, { passive: false });
+        window.addEventListener('touchend', e => onInputEnd(e.changedTouches[0].clientX, e.changedTouches[0].clientY));
+        window.addEventListener('keydown', e => {
+            if (isProcessing) return;
+            if (gameState === 'TITLE') { onInputStart(0, 0); return; }
+            if (!currentPiece || gameState === 'GAMEOVER') return;
+            if (e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === ' ') rotatePiece(1);
+            if (e.key === 'ArrowLeft') rotatePiece(-1);
+            if (e.key === 'ArrowDown') currentPiece.fallSpeed = CONFIG.SPEED_DOWN;
+        });
+        window.addEventListener('keyup', e => { if (e.key === 'ArrowDown' && currentPiece) currentPiece.fallSpeed = CONFIG.SPEED_BASE; });
+        window.addEventListener('resize', () => { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
+        init();
+    </script>
+</body>
+
+</html>
