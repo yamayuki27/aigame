@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>MUCOM88 Visual Engine v48.0</title>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            background: #050505;
+            color: #eee;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            border: 1px solid #00ff41;
+            padding: 20px;
+            box-shadow: 0 0 20px #004411;
+        }
+
+        .status-bar {
+            background: #111;
+            padding: 10px;
+            border: 1px solid #333;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 16px;
+            color: #0f4;
+        }
+
+        .mixer {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(85px, 1fr));
+            gap: 5px;
+            margin-bottom: 15px;
+        }
+
+        .channel {
+            background: #111;
+            border: 1px solid #222;
+            padding: 5px;
+            text-align: center;
+            font-size: 10px;
+        }
+
+        .mute-btn {
+            width: 100%;
+            margin-top: 5px;
+            cursor: pointer;
+            background: #003300;
+            color: #0f4;
+            border: 1px solid #0f4;
+            font-size: 10px;
+        }
+
+        .mute-btn.muted {
+            background: #330000;
+            color: #f00;
+            border-color: #f00;
+        }
+
+        textarea {
+            width: 100%;
+            height: 80px;
+            background: #000;
+            color: #0f4;
+            border: 1px solid #0f4;
+            padding: 10px;
+            font-size: 12px;
+            margin-bottom: 10px;
+        }
+
+        #visualDisplay {
+            width: 100%;
+            height: 400px;
+            background: #000;
+            border: 1px solid #222;
+            padding: 10px;
+            overflow-y: scroll;
+            white-space: pre-wrap;
+            word-break: break-all;
+            font-size: 11px;
+            line-height: 1.6;
+        }
+
+        /* 5色ルール + 警告（コマンドはグレー化しない） */
+        .note-span {
+            color: #ffffff;
+        }
+
+        .hl-warning {
+            color: #ffff00 !important;
+            font-weight: bold;
+        }
+
+        /* 黄: 未知・定義・コメント */
+        .hl-red {
+            color: #ff3333 !important;
+            font-weight: bold;
+            text-decoration: underline;
+        }
+
+        /* 赤: 非対応/引数 */
+        .hl-played {
+            color: #555555 !important;
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        /* 灰: 音符のみ済 */
+        .hl-active {
+            color: #ffffff !important;
+            background: #008800 !important;
+            font-weight: bold;
+            box-shadow: 0 0 8px #0f4;
+        }
+
+        /* 緑: 現 */
+
+        #debugLog {
+            width: 100%;
+            height: 150px;
+            background: #000;
+            color: #0f4;
+            border: 1px solid #333;
+            overflow-y: scroll;
+            padding: 10px;
+            font-size: 11px;
+            margin-top: 10px;
+        }
+
+        button#playBtn {
+            background: #0f4;
+            color: #000;
+            border: none;
+            padding: 10px 25px;
+            font-weight: bold;
+            cursor: pointer;
+            width: 100%;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>MUCOM88 PSG ENGINE v48.0 (Precision Sync)</h1>
+        <div class="status-bar">
+            <div id="measureDisplay">MEASURE: -- / --</div>
+            <div id="tempoDisplay">TEMPO: --- (0.75x Speed)</div>
+        </div>
+        <div class="mixer" id="mixerBoard"></div>
+        <textarea id="mmlInput" placeholder="MMLを貼り付けてください"></textarea>
+        <div id="visualDisplay"></div>
+        <div id="debugLog">--- System Log ---<br></div>
+        <div class="controls"><input type="file" id="fileInput" accept=".muc,.txt"><button id="playBtn">STOP & PLAY (25%
+                SLOW)</button></div>
+    </div>
+    <script>
+        let audioCtx, noiseBuffer, currentMMLString = "";
+        let channelStates = {}, channelGains = {}, charEvents = {};
+        let redIndices = new Set(), yellowIndices = new Set(), whiteIndices = new Set(), noteIndices = new Set();
+        let macros = {};
+        let startTime = 0, currentTempo = 120, isPlaying = false, animationId;
+        const notesMap = { 'c': 0, 'c+': 1, 'c#': 1, 'd-': 1, 'd': 2, 'd+': 3, 'd#': 3, 'e-': 3, 'e': 4, 'f': 5, 'f+': 6, 'f#': 6, 'g-': 6, 'g': 7, 'g+': 8, 'g#': 8, 'a-': 8, 'a': 9, 'a+': 10, 'a#': 10, 'b-': 10, 'b': 11 };
+        const channelLabels = { 'A': 'FM1', 'B': 'FM2', 'C': 'FM3', 'D': 'SSG1', 'E': 'SSG2', 'F': 'SSG3', 'G': 'RHYTHM', 'H': 'FM4', 'I': 'FM5', 'J': 'FM6', 'K': 'PCM' };
+        const supportedCmds = new Set(['T', 't', 'o', 'v', 'l', 'L', 'q', 'p', 'C', '[', ']', '/', '&', '^', '(', ')', '<', '>', 'r', '*', 'D', 'K', 'k', ':', ';']);
+
+        function log(msg, color = '#0f4') {
+            const d = document.getElementById('debugLog');
+            d.innerHTML += `<span style="color:${color}">${msg}</span><br>`;
+            d.scrollTop = d.scrollHeight;
+        }
+
+        const mixerBoard = document.getElementById('mixerBoard');
+        Object.keys(channelLabels).forEach(ch => {
+            const div = document.createElement('div'); div.className = 'channel';
+            div.innerHTML = `${channelLabels[ch]}<br><b>${ch}</b><button class="mute-btn" id="mute-${ch}" onclick="toggleMute('${ch}')">ON</button>`;
+            mixerBoard.appendChild(div);
+        });
+
+        function toggleMute(ch) {
+            const btn = document.getElementById(`mute-${ch}`); const m = btn.classList.toggle('muted');
+            btn.textContent = m ? 'OFF' : 'ON';
+            if (channelGains[ch]) channelGains[ch].gain.setTargetAtTime(m ? 0 : 1, audioCtx ? audioCtx.currentTime : 0, 0.01);
+        }
+
+        async function initAudio() {
+            if (audioCtx) try { await audioCtx.close(); } catch (e) { }
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            Object.keys(channelLabels).forEach(ch => {
+                const g = audioCtx.createGain(); g.gain.value = document.getElementById(`mute-${ch}`).classList.contains('muted') ? 0 : 1;
+                g.connect(audioCtx.destination); channelGains[ch] = g;
+            });
+            noiseBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate, audioCtx.sampleRate);
+            const d = noiseBuffer.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+        }
+
+        function extractMacros(text) {
+            macros = {}; const regex = /#\s*\*(\d+)\s*\{([^}]*)\}/g;
+            let m; while ((m = regex.exec(text)) !== null) macros[m[1]] = m[2];
+        }
+
+        const addRange = (set, startIdx, endIdx) => { for (let k = startIdx; k < endIdx; k++) set.add(k); };
+
+        async function parseAndPlay() {
+            if (animationId) cancelAnimationFrame(animationId);
+            currentMMLString = document.getElementById('mmlInput').value.replace(/\\/g, '¥').replace(/\r\n/g, '\n');
+            if (!currentMMLString) return;
+            extractMacros(currentMMLString); await initAudio();
+            isPlaying = true; charEvents = {};
+            redIndices.clear(); yellowIndices.clear(); whiteIndices.clear(); noteIndices.clear();
+            for (let i = 0; i < currentMMLString.length; i++) charEvents[i] = [];
+            const tempoMatch = currentMMLString.match(/[tT](\d+)/); currentTempo = tempoMatch ? parseInt(tempoMatch[1]) : 120;
+            startTime = audioCtx.currentTime + 0.5;
+
+            const displayArea = document.getElementById('visualDisplay'); displayArea.innerHTML = "";
+            let frag = document.createDocumentFragment();
+            for (let i = 0; i < currentMMLString.length; i++) {
+                let s = document.createElement('span'); s.id = `char-${i}`; s.className = 'note-span'; s.textContent = currentMMLString[i];
+                frag.appendChild(s);
+            }
+            displayArea.appendChild(frag);
+            Object.keys(channelLabels).forEach(ch => channelStates[ch] = { ticks: 0.0, octave: 4, v: 10, l: 4, q: 0.0, clock: 128.0, detune: 0.0, kshift: 0, loopStack: [] });
+
+            const lines = currentMMLString.split('\n');
+            let offset = 0;
+            let allChunks = [];
+
+            lines.forEach((line) => {
+                const mmlSource = line.split(';')[0].split(':')[0];
+                if (line.includes(';')) addRange(yellowIndices, offset + line.indexOf(';'), offset + line.length);
+                if (line.includes(':')) addRange(yellowIndices, offset + line.indexOf(':'), offset + line.length);
+
+                const m = mmlSource.match(/^([A-K])\s+(.*)/i);
+                if (m) {
+                    const chId = m[1].toUpperCase(), content = m[2], state = channelStates[chId], contentStartIdx = line.indexOf(m[2]);
+
+                    let lineChunks = [];
+                    const chunkRegex = /(\S+)/g; let cmatch;
+                    while ((cmatch = chunkRegex.exec(content)) !== null) {
+                        lineChunks.push({ text: cmatch[1], start: offset + contentStartIdx + cmatch.index, end: offset + contentStartIdx + cmatch.index + cmatch[1].length, ticks: 0.0, hasNotes: false });
+                    }
+                    allChunks.push({ chId: chId, chunks: lineChunks, getClock: () => state.clock });
+
+                    const tokenize = (str, startPos) => {
+                        const tokens = [];
+                        const regex = /("[^"]*"|[a-g][+\-#]?|[rvotT<>\[\]&/^()kqd@%mpeyCclL!S\$wW*DKKEp:;]|\d+|\.+|\$[0-9a-fA-F]+|[+-]|\,)|(\S)/g;
+                        let t; while ((t = regex.exec(str)) !== null) {
+                            const val = t[1] || t[0], gi = startPos + t.index;
+                            tokens.push({ val, idx: gi, len: val.length, isNote: /^[a-g][+\-#]?$/.test(val), isCmd: supportedCmds.has(val) });
+                        }
+                        return tokens;
+                    };
+
+                    const addTicksToChunk = (tIdx, tks) => {
+                        let chunk = lineChunks.find(c => tIdx >= c.start && tIdx < c.end);
+                        if (chunk) { chunk.ticks += tks; chunk.hasNotes = true; }
+                    };
+
+                    const isArg = (tok) => {
+                        if (!tok || tok.isNote || supportedCmds.has(tok.val)) return false;
+                        return /^[0-9,.\-\+\$]$/.test(tok.val[0]) || tok.val.startsWith('"');
+                    };
+
+                    const process = (tkns) => {
+                        for (let i = 0; i < tkns.length; i++) {
+                            let t = tkns[i]; const lowVal = t.val.toLowerCase();
+                            const original_i = i;
+                            const time = startTime + (state.ticks * (240 / (currentTempo * 0.75 * state.clock)));
+
+                            if (t.val === '*') {
+                                let mId = ""; while (i + 1 < tkns.length && /^\d+$/.test(tkns[i + 1].val)) { i++; mId += tkns[i].val; }
+                                if (macros[mId]) process(tokenize(macros[mId], t.idx));
+                                for (let k = original_i; k <= i; k++) for (let c = 0; c < tkns[k].len; c++) charEvents[tkns[k].idx + c].push({ time, end: time + 0.01 });
+                                addRange(whiteIndices, t.idx, tkns[i].idx + tkns[i].len);
+                                continue;
+                            }
+
+                            if (t.isNote || lowVal === 'r') {
+                                let evIdxs = [];
+                                let totalNoteTicks = 0.0;
+
+                                const parseSegment = () => {
+                                    let s_idx = i; evIdxs.push(i);
+                                    let baseLen = state.l;
+                                    if (i + 1 < tkns.length && /^\d+/.test(tkns[i + 1].val)) { i++; baseLen = parseFloat(tkns[i].val); evIdxs.push(i); }
+                                    let bt = state.clock / baseLen; let segTicks = bt; let dv = bt / 2;
+                                    while (i + 1 < tkns.length && tkns[i + 1].val.startsWith('.')) {
+                                        i++; for (let d = 0; d < tkns[i].len; d++) { segTicks += dv; dv /= 2; }
+                                        evIdxs.push(i);
+                                    }
+                                    addTicksToChunk(tkns[s_idx].idx, segTicks);
+                                    return segTicks;
+                                };
+
+                                totalNoteTicks += parseSegment();
+
+                                while (i + 1 < tkns.length && (tkns[i + 1].val === '&' || tkns[i + 1].val === '^')) {
+                                    i++; evIdxs.push(i);
+                                    if (i + 1 < tkns.length && (tkns[i + 1].isNote || tkns[i + 1].val.toLowerCase() === 'r' || /^\d/.test(tkns[i + 1].val))) {
+                                        if (/^\d/.test(tkns[i + 1].val)) {
+                                            i++; evIdxs.push(i);
+                                            let tieLen = parseFloat(tkns[i].val);
+                                            let bt = state.clock / tieLen; let segTicks = bt; let dv = bt / 2;
+                                            while (i + 1 < tkns.length && tkns[i + 1].val.startsWith('.')) {
+                                                i++; for (let d = 0; d < tkns[i].len; d++) { segTicks += dv; dv /= 2; }
+                                                evIdxs.push(i);
+                                            }
+                                            addTicksToChunk(tkns[original_i].idx, segTicks);
+                                            totalNoteTicks += segTicks;
+                                        } else {
+                                            i++; totalNoteTicks += parseSegment();
+                                        }
+                                    } else break;
+                                }
+
+                                const durF = totalNoteTicks * (240 / (currentTempo * 0.75 * state.clock));
+                                if (lowVal !== 'r') {
+                                    const f = 440 * Math.pow(2, (notesMap[lowVal] + (state.octave - 4) * 12 + state.kshift) / 12) + (state.detune * 0.1);
+                                    const qO = (state.q * (240 / (currentTempo * 0.75 * state.clock)));
+                                    playPSG(f, time, Math.max(0.001, durF - qO), state.v, chId);
+                                    if (chId === 'G') playDrum(lowVal[0], time, state.v);
+                                }
+
+                                evIdxs.forEach(idx => {
+                                    let tok = tkns[idx];
+                                    addRange(noteIndices, tok.idx, tok.idx + tok.len);
+                                    for (let k = 0; k < tok.len; k++) charEvents[tok.idx + k].push({ time, end: time + durF });
+                                });
+                                state.ticks += totalNoteTicks;
+                            }
+                            else if (t.isCmd) {
+                                let cmdChar = t.val;
+                                if (cmdChar === 'M' && tkns[i + 1] && ['F', 'W', 'C', 'L', 'D'].includes(tkns[i + 1].val)) { i++; cmdChar = 'M' + tkns[i].val; }
+                                else if (cmdChar === 'v' && tkns[i + 1]?.val === 'm') { i++; cmdChar = 'vm'; }
+                                else if (cmdChar === 'y' && tkns[i + 1] && tkns[i + 2]) {
+                                    let combo = tkns[i + 1].val + tkns[i + 2].val;
+                                    if (['DM', 'TL', 'KA', 'DR', 'SR', 'SL', 'SE'].includes(combo)) { i += 2; cmdChar = 'y' + combo; }
+                                }
+
+                                let args = [];
+                                while (i + 1 < tkns.length && isArg(tkns[i + 1])) {
+                                    i++; args.push(tkns[i].val);
+                                }
+
+                                let isSupported = supportedCmds.has(t.val) && cmdChar !== 'vm' && !cmdChar.startsWith('y') && !cmdChar.startsWith('M');
+                                if (t.val === 'M' || t.val === 'w' || t.val === '@' || t.val === 'E') isSupported = false;
+
+                                let endIdx = tkns[i].idx + tkns[i].len;
+                                if (isSupported) {
+                                    addRange(whiteIndices, tkns[original_i].idx, endIdx);
+                                    let numArgs = args.filter(a => /^[\-+]?\d+/.test(a)).map(a => parseFloat(a));
+
+                                    if (cmdChar === 'C' && numArgs.length) state.clock = numArgs[0];
+                                    if (cmdChar === 'q' && numArgs.length) state.q = numArgs[0];
+                                    if (cmdChar === 'l' && numArgs.length) state.l = numArgs[0];
+                                    if (cmdChar === 'o' && numArgs.length) state.octave = numArgs[0];
+                                    if (cmdChar === 'v' && numArgs.length) state.v = numArgs[0];
+                                    if (cmdChar.toLowerCase() === 't' && numArgs.length) currentTempo = numArgs[0];
+
+                                    if (cmdChar === 'D') {
+                                        let vStr = args.join(''); let val = parseInt(vStr) || 0;
+                                        if (vStr.startsWith('+') || vStr.startsWith('-')) state.detune += val; else state.detune = val;
+                                    }
+                                    if (cmdChar === 'K') state.kshift = parseInt(args.join('')) || 0;
+                                    if (cmdChar === 'k') state.kshift += parseInt(args.join('')) || 0;
+
+                                    if (cmdChar === '(' || cmdChar === ')') {
+                                        let dir = cmdChar === '(' ? -1 : 1; let step = numArgs.length ? numArgs[0] : 1;
+                                        state.v = Math.max(0, Math.min(127, state.v + dir * step));
+                                    }
+                                    if (cmdChar === '[') {
+                                        let max = numArgs.length ? numArgs[0] : 2;
+                                        let d = 0, ei = -1; for (let j = i + 1; j < tkns.length; j++) { if (tkns[j].val === '[') d++; else if (tkns[j].val === ']') { if (d === 0) { ei = j; break; } d--; } }
+                                        if (ei !== -1 && tkns[ei + 1] && /^\d+$/.test(tkns[ei + 1].val)) max = parseInt(tkns[ei + 1].val);
+                                        state.loopStack.push({ startIdx: i, endIdx: ei, count: 0, max });
+                                    }
+                                    if (cmdChar === '/') { let l = state.loopStack[state.loopStack.length - 1]; if (l && l.count === l.max - 1) i = l.endIdx - 1; }
+                                    if (cmdChar === ']') { let l = state.loopStack[state.loopStack.length - 1]; if (l) { l.count++; if (l.count < l.max) i = l.startIdx; else { state.loopStack.pop(); } } }
+                                } else {
+                                    addRange(redIndices, tkns[original_i].idx, endIdx);
+                                }
+
+                                for (let k = original_i; k <= i; k++) {
+                                    for (let c = 0; c < tkns[k].len; c++) charEvents[tkns[k].idx + c].push({ time, end: time + 0.01 });
+                                }
+                            } else {
+                                addRange(yellowIndices, t.idx, t.idx + t.len);
+                            }
+                        }
+                    };
+                    process(tokenize(content, offset + contentStartIdx));
+                } else if (line.trim().startsWith('#') || line.trim().startsWith('@')) {
+                    addRange(yellowIndices, offset, offset + line.length);
+                }
+                offset += line.length + 1;
+            });
+
+            // ブロック長（小節）の検証と警告出力
+            log("--- Compilation Finished. Validating Measure Lengths... ---", "#0f4");
+            allChunks.forEach(track => {
+                let clk = track.getClock();
+                track.chunks.forEach(c => {
+                    if (c.hasNotes) {
+                        let remainder = c.ticks % clk;
+                        // 浮動小数点誤差を許容 (0.001)
+                        if (remainder > 0.001 && (clk - remainder) > 0.001) {
+                            log(`[警告] トラック ${track.chId} のブロック [ ${c.text} ] は ${c.ticks.toFixed(2)} ティック (${(c.ticks / clk).toFixed(2)} 小節分) です。`, "#ff0");
+                        }
+                    }
+                });
+            });
+            log("Playback Started.", "#0f4");
+            animationId = requestAnimationFrame(draw);
+        }
+
+        function playPSG(f, t, d, v, ch) {
+            if (isNaN(f) || f <= 0) return;
+            const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+            o.type = 'square'; o.frequency.setValueAtTime(f, t);
+            g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(Math.max(0, v) * 0.01, t + 0.005); g.gain.linearRampToValueAtTime(0, t + d);
+            o.connect(g).connect(channelGains[ch]); o.start(t); o.stop(t + d);
+        }
+
+        function playDrum(c, t, v) {
+            const g = audioCtx.createGain(); g.connect(channelGains['G']); const vol = Math.max(0, v) * 0.04;
+            if (c === 'c') {
+                const o = audioCtx.createOscillator(); o.frequency.setValueAtTime(150, t); o.frequency.exponentialRampToValueAtTime(40, t + 0.08);
+                g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+                o.connect(g); o.start(t); o.stop(t + 0.08);
+            } else if (c === 'd' || c === 'f' || c === 'g') {
+                const s = audioCtx.createBufferSource(); s.buffer = noiseBuffer;
+                const f = audioCtx.createBiquadFilter(); f.type = (c === 'd' ? 'bandpass' : 'highpass'); f.frequency.value = (c === 'd' ? 1200 : 8000);
+                g.gain.setValueAtTime(vol * (c === 'd' ? 1 : 0.5), t); g.gain.exponentialRampToValueAtTime(0.001, t + (c === 'g' ? 0.2 : 0.1));
+                s.connect(f).connect(g); s.start(t); s.stop(t + (c === 'g' ? 0.2 : 0.1));
+            }
+        }
+
+        function draw() {
+            if (!isPlaying || !audioCtx) return; const now = audioCtx.currentTime;
+            for (let i = 0; i < currentMMLString.length; i++) {
+                const evs = charEvents[i]; const el = document.getElementById(`char-${i}`); if (!el) continue;
+                let charState = 'idle';
+                if (evs && evs.length) {
+                    for (let e of evs) {
+                        if (now >= e.time && now <= e.end) { charState = 'active'; break; }
+                        else if (now > e.end) charState = 'played';
+                        else if (now < e.time && charState === 'played') { charState = 'idle'; break; }
+                    }
+                }
+
+                let targetClass = 'note-span';
+                if (redIndices.has(i)) targetClass += ' hl-red';
+                else if (yellowIndices.has(i)) targetClass += ' hl-warning';
+
+                if (charState === 'active') targetClass += ' hl-active';
+                else if (charState === 'played' && noteIndices.has(i)) targetClass += ' hl-played';
+
+                if (el.className !== targetClass) el.className = targetClass;
+            }
+            const ticks = (now - startTime) / (240 / (currentTempo * 0.75 * 128.0));
+            if (ticks > 0) document.getElementById('measureDisplay').textContent = `MEASURE: ${Math.floor(ticks / 128) + 1}`;
+            animationId = requestAnimationFrame(draw);
+        }
+
+        document.getElementById('playBtn').onclick = () => parseAndPlay();
+        document.getElementById('fileInput').onchange = (e) => {
+            const r = new FileReader(); r.onload = (ev) => { document.getElementById('mmlInput').value = ev.target.result; log("MML Loaded."); };
+            r.readAsText(e.target.files[0]);
+        };
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>MUCOM88 Visual Engine v20.0</title>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            background: #050505;
+            color: #eee;
+            padding: 20px;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            border: 1px solid #00ff41;
+            padding: 20px;
+            box-shadow: 0 0 20px #004411;
+        }
+
+        .status-bar {
+            background: #111;
+            padding: 10px;
+            border: 1px solid #333;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 16px;
+            color: #0f4;
+        }
+
+        .mixer {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(85px, 1fr));
+            gap: 5px;
+            margin-bottom: 15px;
+        }
+
+        .channel {
+            background: #111;
+            border: 1px solid #222;
+            padding: 5px;
+            text-align: center;
+            font-size: 10px;
+        }
+
+        .mute-btn {
+            width: 100%;
+            margin-top: 5px;
+            cursor: pointer;
+            background: #003300;
+            color: #0f4;
+            border: 1px solid #0f4;
+            font-size: 10px;
+        }
+
+        .mute-btn.muted {
+            background: #330000;
+            color: #f00;
+            border-color: #f00;
+        }
+
+        textarea {
+            width: 100%;
+            height: 80px;
+            background: #000;
+            color: #0f4;
+            border: 1px solid #0f4;
+            padding: 10px;
+            font-size: 12px;
+            margin-bottom: 10px;
+        }
+
+        #visualDisplay {
+            width: 100%;
+            height: 400px;
+            background: #000;
+            border: 1px solid #222;
+            padding: 10px;
+            overflow-y: scroll;
+            white-space: pre-wrap;
+            word-break: break-all;
+            font-size: 11px;
+            line-height: 1.6;
+        }
+
+        .note-span {
+            color: #ffffff;
+            opacity: 0.9;
+        }
+
+        .hl-unsupported {
+            color: #ffff00 !important;
+            font-weight: bold;
+            opacity: 1;
+        }
+
+        .hl-active {
+            color: #fff !important;
+            background: #00aa00 !important;
+            font-weight: bold;
+            box-shadow: 0 0 8px #0f4;
+            z-index: 10;
+            opacity: 1;
+        }
+
+        .hl-played {
+            color: #00ff41 !important;
+            background: rgba(0, 255, 65, 0.12);
+            opacity: 0.7;
+        }
+
+        #debugLog {
+            width: 100%;
+            height: 100px;
+            background: #000;
+            color: #ffae00;
+            border: 1px solid #333;
+            overflow-y: scroll;
+            padding: 10px;
+            font-size: 11px;
+            margin-top: 10px;
+        }
+
+        button#playBtn {
+            background: #0f4;
+            color: #000;
+            border: none;
+            padding: 10px 25px;
+            font-weight: bold;
+            cursor: pointer;
+            width: 100%;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>MUCOM88 PSG ENGINE v20.0 (Macro Support)</h1>
+        <div class="status-bar">
+            <div id="measureDisplay">MEASURE: -- / --</div>
+            <div id="tempoDisplay">TEMPO: ---</div>
+        </div>
+        <div class="mixer" id="mixerBoard"></div>
+        <textarea id="mmlInput" placeholder="MMLファイルを読み込んでください"></textarea>
+        <div id="visualDisplay"></div>
+        <div id="debugLog">--- System Log ---<br></div>
+        <div class="controls"><input type="file" id="fileInput" accept=".muc,.txt"><button id="playBtn">STOP &
+                PLAY</button></div>
+    </div>
+    <script>
+        let audioCtx, noiseBuffer, currentMMLString = "";
+        let channelStates = {}, channelGains = {}, charEvents = {}, yellowIndices = new Set(), macros = {};
+        let startTime = 0, currentTempo = 120, isPlaying = false, animationId;
+        const notesMap = { 'c': 0, 'c+': 1, 'c#': 1, 'd-': 1, 'd': 2, 'd+': 3, 'd#': 3, 'e-': 3, 'e': 4, 'f': 5, 'f+': 6, 'f#': 6, 'g-': 6, 'g': 7, 'g+': 8, 'g#': 8, 'a-': 8, 'a': 9, 'a+': 10, 'a#': 10, 'b-': 10, 'b': 11 };
+        const channelLabels = { 'A': 'FM1', 'B': 'FM2', 'C': 'FM3', 'D': 'SSG1', 'E': 'SSG2', 'F': 'SSG3', 'G': 'RHYTHM', 'H': 'FM4', 'I': 'FM5', 'J': 'FM6', 'K': 'PCM' };
+        const supportedCmds = new Set(['t', 'o', 'v', 'l', 'q', 'c', '[', ']', '/', '&', '(', ')', '<', '>', 'r', '*', 'C']);
+
+        function log(msg, err = false) {
+            const d = document.getElementById('debugLog');
+            d.innerHTML += `<span style="color:${err ? '#f44' : '#fa0'}">${msg}</span><br>`;
+            d.scrollTop = d.scrollHeight;
+        }
+
+        const mixerBoard = document.getElementById('mixerBoard');
+        Object.keys(channelLabels).forEach(ch => {
+            const div = document.createElement('div');
+            div.className = 'channel';
+            div.innerHTML = `${channelLabels[ch]}<br><b>${ch}</b><button class="mute-btn" id="mute-${ch}" onclick="toggleMute('${ch}')">ON</button>`;
+            mixerBoard.appendChild(div);
+        });
+
+        function toggleMute(ch) {
+            const btn = document.getElementById(`mute-${ch}`);
+            const m = btn.classList.toggle('muted');
+            btn.textContent = m ? 'OFF' : 'ON';
+            if (channelGains[ch]) channelGains[ch].gain.setTargetAtTime(m ? 0 : 1, audioCtx ? audioCtx.currentTime : 0, 0.01);
+        }
+
+        async function initAudio() {
+            if (audioCtx) { try { await audioCtx.close(); } catch (e) { } }
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            Object.keys(channelLabels).forEach(ch => {
+                const g = audioCtx.createGain();
+                g.gain.value = document.getElementById(`mute-${ch}`).classList.contains('muted') ? 0 : 1;
+                g.connect(audioCtx.destination);
+                channelGains[ch] = g;
+            });
+            noiseBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate, audioCtx.sampleRate);
+            const d = noiseBuffer.getChannelData(0);
+            for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+        }
+
+        // マクロ定義の抽出 (# *n{...}) 
+        function extractMacros(text) {
+            macros = {};
+            const regex = /#\s*\*(\d+)\s*\{([^}]*)\}/g;
+            let m;
+            while ((m = regex.exec(text)) !== null) {
+                macros[m[1]] = m[2];
+                log(`Macro Found: *${m[1]} -> ${m[2].substring(0, 20)}...`);
+            }
+        }
+
+        async function parseAndPlay() {
+            if (animationId) cancelAnimationFrame(animationId);
+            currentMMLString = document.getElementById('mmlInput').value.replace(/\r\n/g, '\n');
+            if (!currentMMLString) return;
+            extractMacros(currentMMLString);
+            await initAudio();
+            isPlaying = true; charEvents = {}; yellowIndices.clear();
+            startTime = audioCtx.currentTime + 0.5;
+
+            const displayArea = document.getElementById('visualDisplay');
+            displayArea.innerHTML = ""; let frag = document.createDocumentFragment();
+            for (let i = 0; i < currentMMLString.length; i++) {
+                let s = document.createElement('span'); s.id = `char-${i}`; s.className = 'note-span'; s.textContent = currentMMLString[i];
+                frag.appendChild(s); charEvents[i] = [];
+            }
+            displayArea.appendChild(frag);
+
+            Object.keys(channelLabels).forEach(ch => channelStates[ch] = { ticks: 0, octave: 4, v: 10, l: 4, q: 8, clock: 96, loopStack: [] });
+
+            const lines = currentMMLString.split('\n');
+            let offset = 0;
+
+            lines.forEach((line) => {
+                const mmlSource = line.split(';')[0];
+                const m = mmlSource.match(/^([A-K])\s+(.*)/i);
+                if (m) {
+                    const chId = m[1].toUpperCase(), content = m[2], state = channelStates[chId];
+                    const contentStartIdx = line.indexOf(m[2]);
+
+                    const tokenize = (str, startPos) => {
+                        const tokens = [];
+                        const regex = /([a-g][+\-#]?|[rvot<>\[\]&/()kqd@mpeyCclL!S\$]|\d+\.?\d*|\$[0-9a-fA-F]+|\*)|(\S)/g;
+                        let tMatch;
+                        while ((tMatch = regex.exec(str)) !== null) {
+                            const val = tMatch[1] || tMatch[0], globalIdx = startPos + tMatch.index;
+                            const isCmdChar = /^[a-z<>()[\]&/r@mpeyS$C\*]$/i.test(val);
+                            tokens.push({ val, idx: globalIdx, len: val.length, isCmdChar });
+                        }
+                        return tokens;
+                    };
+
+                    let tokens = tokenize(content, offset + contentStartIdx);
+
+                    const process = (tkns) => {
+                        for (let i = 0; i < tkns.length; i++) {
+                            let t = tkns[i];
+                            const lowVal = t.val.toLowerCase();
+
+                            // マクロ呼び出しの処理 (*n) 
+                            if (t.val === '*') {
+                                let mId = "";
+                                while (i + 1 < tkns.length && /^\d+$/.test(tkns[i + 1].val)) {
+                                    mId += tkns[++i].val;
+                                }
+                                if (macros[mId]) {
+                                    // マクロ内容をその場でトークン化して再帰的に処理
+                                    const mTkns = tokenize(macros[mId], t.idx);
+                                    process(mTkns);
+                                }
+                                continue;
+                            }
+
+                            if (notesMap[lowVal] !== undefined || lowVal === 'r') {
+                                let eventIndices = [];
+                                const getNoteInfo = (idx) => {
+                                    let cur = tkns[idx]; eventIndices.push({ start: cur.idx, len: cur.len });
+                                    let len = state.l;
+                                    if (idx + 1 < tkns.length && /^\d/.test(tkns[idx + 1].val)) {
+                                        let n = tkns[++idx]; len = parseFloat(n.val) || state.l;
+                                        eventIndices.push({ start: n.idx, len: n.len });
+                                        if (n.val.includes('.')) len /= 1.5;
+                                    }
+                                    return { ticks: (state.clock * 4) / len, nextIdx: idx };
+                                };
+                                let nInfo = getNoteInfo(i); let totalTicks = nInfo.ticks; i = nInfo.nextIdx;
+                                while (i + 1 < tkns.length && tkns[i + 1].val === '&') {
+                                    eventIndices.push({ start: tkns[++i].idx, len: tkns[i].len });
+                                    if (i + 1 < tkns.length && notesMap[tkns[i + 1].val.toLowerCase()] !== undefined) {
+                                        let nxt = getNoteInfo(++i); totalTicks += nxt.ticks; i = nxt.nextIdx;
+                                    } else break;
+                                }
+                                const time = startTime + (state.ticks * (60 / (currentTempo * state.clock)));
+                                const durFull = totalTicks * (60 / (currentTempo * state.clock));
+                                if (lowVal !== 'r') {
+                                    const freq = 440 * Math.pow(2, (notesMap[lowVal] + (state.octave - 4) * 12) / 12);
+                                    if (chId === 'G') playDrum(lowVal[0], time, state.v);
+                                    else playPSG(freq, time, durFull * (state.q / 8), state.v, chId);
+                                }
+                                eventIndices.forEach(range => { for (let k = 0; k < range.len; k++) if (charEvents[range.start + k]) charEvents[range.start + k].push({ time, end: time + durFull }); });
+                                state.ticks += totalTicks;
+                            }
+                            else if (lowVal === 't') { i++; let v = parseInt(tkns[i]?.val); if (v) currentTempo = v; }
+                            else if (t.val === 'C') { i++; let v = parseInt(tkns[i]?.val); if (v) state.clock = v; }
+                            else if (lowVal === 'o') { i++; let v = parseInt(tkns[i]?.val); if (!isNaN(v)) state.octave = v; }
+                            else if (t.val === '<') state.octave--; else if (t.val === '>') state.octave++;
+                            else if (t.val === '(') state.v--; else if (t.val === ')') state.v++;
+                            else if (lowVal === 'l') { i++; let v = parseInt(tkns[i]?.val); if (v) state.l = v; }
+                            else if (lowVal === 'q') { i++; let v = parseInt(tkns[i]?.val); if (v) state.q = v; }
+                            else if (t.val === '[') {
+                                let depth = 0, endIdx = -1;
+                                for (let j = i + 1; j < tkns.length; j++) {
+                                    if (tkns[j].val === '[') depth++; else if (tkns[j].val === ']') { if (depth === 0) { endIdx = j; break; } depth--; }
+                                }
+                                let max = 2;
+                                if (endIdx !== -1 && tkns[endIdx + 1] && /^\d+$/.test(tkns[endIdx + 1].val)) { max = parseInt(tkns[endIdx + 1].val); }
+                                state.loopStack.push({ startIdx: i, endIdx, count: 0, max });
+                            }
+                            else if (t.val === '/') {
+                                let l = state.loopStack[state.loopStack.length - 1];
+                                if (l && l.count === l.max - 1) i = l.endIdx - 1;
+                            }
+                            else if (t.val === ']') {
+                                let l = state.loopStack[state.loopStack.length - 1];
+                                if (l) { l.count++; if (l.count < l.max) i = l.startIdx; else { state.loopStack.pop(); if (tkns[i + 1] && /^\d+$/.test(tkns[i + 1].val)) i++; } }
+                            }
+                            else if (t.isCmdChar) {
+                                const isSupported = supportedCmds.has(lowVal);
+                                if (!isSupported) {
+                                    for (let k = 0; k < t.len; k++) yellowIndices.add(t.idx + k);
+                                    while (i + 1 < tkns.length && (!tkns[i + 1].isCmdChar || tkns[i + 1].val === ',' || tkns[i + 1].val === '$')) {
+                                        i++;
+                                        for (let k = 0; k < tkns[i].len; k++) yellowIndices.add(tkns[i].idx + k);
+                                    }
+                                }
+                            }
+                        }
+                    };
+                    process(tokens);
+                }
+                offset += line.length + 1;
+            });
+            yellowIndices.forEach(idx => document.getElementById(`char-${idx}`)?.classList.add('hl-unsupported'));
+            log(`Parsing complete. Sync verified.`);
+            document.getElementById('tempoDisplay').textContent = `TEMPO: ${currentTempo}`;
+            animationId = requestAnimationFrame(draw);
+        }
+
+        function playPSG(f, t, d, v, ch) {
+            if (isNaN(f) || f <= 0) return;
+            const osc = audioCtx.createOscillator(); const g = audioCtx.createGain();
+            osc.type = 'square'; osc.frequency.setValueAtTime(f, t);
+            g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(Math.max(0, v) * 0.01, t + 0.005); g.gain.linearRampToValueAtTime(0, t + d);
+            osc.connect(g).connect(channelGains[ch]); osc.start(t); osc.stop(t + d);
+        }
+
+        function playDrum(c, t, v) {
+            const g = audioCtx.createGain(); g.connect(channelGains['G']); const vol = Math.max(0, v) * 0.04;
+            if (c === 'c') {
+                const o = audioCtx.createOscillator(); o.frequency.setValueAtTime(150, t); o.frequency.exponentialRampToValueAtTime(40, t + 0.08);
+                g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+                o.connect(g); o.start(t); o.stop(t + 0.08);
+            } else if (c === 'd' || c === 'f') {
+                const s = audioCtx.createBufferSource(); s.buffer = noiseBuffer;
+                const f = audioCtx.createBiquadFilter(); f.type = (c === 'd' ? 'bandpass' : 'highpass'); f.frequency.value = (c === 'd' ? 1200 : 9000);
+                g.gain.setValueAtTime(c === 'd' ? vol : vol * 0.3, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+                s.connect(f).connect(gain); s.start(t); s.stop(t + 0.1);
+            }
+        }
+
+        function draw() {
+            if (!isPlaying || !audioCtx) return;
+            const now = audioCtx.currentTime;
+            for (let i = 0; i < currentMMLString.length; i++) {
+                const evs = charEvents[i]; if (!evs || !evs.length) continue;
+                const el = document.getElementById(`char-${i}`); if (!el) continue;
+                let state = 'idle';
+                for (let e of evs) { if (now >= e.time && now <= e.end) { state = 'active'; break; } else if (now > e.end) state = 'played'; else if (now < e.time && state === 'played') state = 'idle'; }
+                if (state === 'active' && !el.classList.contains('hl-active')) { el.className = 'note-span hl-active'; }
+                else if (state === 'played' && !el.classList.contains('hl-played')) { el.className = 'note-span hl-played'; }
+                else if (state === 'idle' && (el.classList.contains('hl-active') || el.classList.contains('hl-played'))) { el.className = 'note-span' + (yellowIndices.has(i) ? ' hl-unsupported' : ''); }
+            }
+            const clock = channelStates['A']?.clock || 96;
+            const ticks = (now - startTime) / (60 / (currentTempo * clock));
+            if (ticks > 0) document.getElementById('measureDisplay').textContent = `MEASURE: ${Math.floor(ticks / (clock * 4)) + 1}`;
+            animationId = requestAnimationFrame(draw);
+        }
+
+        document.getElementById('playBtn').onclick = () => parseAndPlay();
+        document.getElementById('fileInput').onchange = (e) => {
+            const r = new FileReader(); r.onload = (ev) => { document.getElementById('mmlInput').value = ev.target.result; log("MML Loaded."); };
+            r.readAsText(e.target.files[0]);
+        };
+    </script>
+</body>
+
+</html>

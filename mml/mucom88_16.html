@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>MUCOM88 ENGINE v52.0 (FM Step 11 - Full Spec & Preset Voice Bank)</title>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            background: #050505;
+            color: #eee;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1050px;
+            margin: 0 auto;
+            border: 1px solid #00ff41;
+            padding: 20px;
+            box-shadow: 0 0 20px #004411;
+        }
+
+        .status-bar {
+            background: #111;
+            padding: 10px;
+            border: 1px solid #333;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 16px;
+            color: #0f4;
+        }
+
+        .master-controls {
+            background: #002200;
+            padding: 10px;
+            border: 1px solid #0f4;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .master-controls label {
+            font-size: 14px;
+            color: #0f4;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .master-controls input[type="range"] {
+            flex-grow: 1;
+            accent-color: #0f4;
+        }
+
+        .mixer {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+            gap: 5px;
+            margin-bottom: 10px;
+        }
+
+        .channel {
+            background: #111;
+            border: 1px solid #222;
+            padding: 5px;
+            text-align: center;
+            font-size: 11px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .slider-container {
+            margin: 8px 0;
+            background: #000;
+            padding: 4px;
+            border: 1px solid #333;
+        }
+
+        .slider-container label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 9px;
+            color: #aaa;
+            margin-bottom: 2px;
+            text-align: left;
+        }
+
+        .slider-container .val-disp {
+            color: #0f4;
+            font-weight: bold;
+        }
+
+        .slider-container input[type="range"] {
+            width: 100%;
+            margin: 0;
+            cursor: pointer;
+            accent-color: #0f4;
+        }
+
+        .mute-btn {
+            width: 100%;
+            padding: 4px 0;
+            cursor: pointer;
+            background: #003300;
+            color: #0f4;
+            border: 1px solid #0f4;
+            font-size: 10px;
+            font-weight: bold;
+        }
+
+        .mute-btn.muted {
+            background: #330000;
+            color: #f00;
+            border-color: #f00;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 15px;
+            background: #0a0a0a;
+            padding: 10px;
+            border: 1px dashed #333;
+        }
+
+        button#playBtn {
+            background: #0f4;
+            color: #000;
+            border: none;
+            padding: 10px 25px;
+            font-weight: bold;
+            cursor: pointer;
+            flex-grow: 1;
+            font-size: 16px;
+        }
+
+        .toggle-label {
+            color: #0f4;
+            font-weight: bold;
+            font-size: 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        textarea {
+            width: 100%;
+            height: 80px;
+            background: #000;
+            color: #0f4;
+            border: 1px solid #0f4;
+            padding: 10px;
+            font-size: 12px;
+            margin-bottom: 10px;
+        }
+
+        #visualDisplay {
+            width: 100%;
+            height: 300px;
+            background: #000;
+            border: 1px solid #222;
+            padding: 10px;
+            overflow-y: scroll;
+            white-space: pre-wrap;
+            word-break: break-all;
+            font-size: 11px;
+            line-height: 1.6;
+        }
+
+        .note-span {
+            color: #ffffff;
+        }
+
+        .hl-warning {
+            color: #ffff00 !important;
+            font-weight: bold;
+        }
+
+        .hl-red {
+            color: #ff3333 !important;
+            font-weight: bold;
+            text-decoration: underline;
+        }
+
+        .hl-played {
+            color: #555555 !important;
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .hl-active {
+            color: #ffffff !important;
+            background: #008800 !important;
+            font-weight: bold;
+            box-shadow: 0 0 8px #0f4;
+        }
+
+        #debugLog {
+            width: 100%;
+            height: 100px;
+            background: #000;
+            color: #0f4;
+            border: 1px solid #333;
+            overflow-y: scroll;
+            padding: 10px;
+            font-size: 11px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>MUCOM88 ENGINE v52.0 (Step 11 - Full Spec & Presets)</h1>
+        <div class="status-bar">
+            <div id="measureDisplay">MEASURE: -- / --</div>
+            <div id="tempoDisplay">TEMPO: --- (0.75x Speed)</div>
+        </div>
+
+        <div class="master-controls">
+            <label>Master Pitch (FM Only): <span id="pitch-val">1.00</span>x</label>
+            <input type="range" id="master-pitch" min="-1.0" max="1.0" step="0.01" value="0.0"
+                oninput="document.getElementById('pitch-val').innerText = Math.pow(10, parseFloat(this.value)).toFixed(2)">
+        </div>
+
+        <div class="mixer" id="mixerBoard"></div>
+
+        <div class="controls">
+            <input type="file" id="fileInput" accept=".muc,.txt">
+            <label class="toggle-label">
+                <input type="checkbox" id="fmToggle" checked>
+                FM音源を有効化
+            </label>
+            <button id="playBtn">STOP & PLAY (25% SLOW)</button>
+        </div>
+
+        <textarea id="mmlInput" placeholder="MMLを貼り付けてください"></textarea>
+        <div id="visualDisplay"></div>
+        <div id="debugLog">--- System Log ---<br></div>
+    </div>
+
+    <script>
+        let audioCtx, noiseBuffer, currentMMLString = "";
+        let channelStates = {}, channelGains = {}, charEvents = {}, charColors = new Uint8Array(0), charTicks = new Float64Array(0), noteIndices = new Set(), macros = {};
+        let fmInstruments = {};
+        let startTime = 0, currentTempo = 120, isPlaying = false, animationId;
+        const notesMap = { 'c': 0, 'c+': 1, 'c#': 1, 'd-': 1, 'd': 2, 'd+': 3, 'd#': 3, 'e-': 3, 'e': 4, 'f': 5, 'f+': 6, 'f#': 6, 'g-': 6, 'g': 7, 'g+': 8, 'g#': 8, 'a-': 8, 'a': 9, 'a+': 10, 'a#': 10, 'b-': 10, 'b': 11 };
+
+        const channelLabels = { 'A': 'FM1', 'B': 'FM2', 'C': 'FM3', 'D': 'SSG1', 'E': 'SSG2', 'F': 'SSG3', 'G': 'RHYTHM', 'H': 'FM4', 'I': 'FM5', 'J': 'FM6', 'K': 'PCM' };
+        const fmChannels = new Set(['A', 'B', 'C', 'H', 'I', 'J']);
+        const supportedCmds = new Set(['T', 't', 'o', 'v', 'l', 'L', 'q', 'p', 'C', '[', ']', '/', '&', '^', '(', ')', '<', '>', 'r', '*', 'D', 'K', 'k', ':', ';', '@', 'M', 'E', 'y']);
+        const C_WHITE = 1, C_YELLOW = 2, C_RED = 3;
+
+        // ★プリセット音色の定義
+        const defaultInst = {
+            fb: 5, alg: 4,
+            op1: { ar: 31, dr: 10, sr: 0, rr: 7, sl: 2, tl: 0, ks: 1, ml: 1, dt: 0 },
+            op2: { ar: 31, dr: 15, sr: 5, rr: 7, sl: 3, tl: 15, ks: 1, ml: 2, dt: 0 },
+            op3: { ar: 31, dr: 10, sr: 0, rr: 7, sl: 2, tl: 0, ks: 1, ml: 1, dt: 0 },
+            op4: { ar: 31, dr: 15, sr: 5, rr: 7, sl: 3, tl: 15, ks: 1, ml: 2, dt: 0 }
+        };
+
+        const voiceBank = {
+            default: defaultInst,
+            trumpet: { fb: 2, alg: 5, op1: { ar: 20, dr: 10, sr: 5, rr: 5, sl: 2, tl: 0, ks: 1, ml: 1, dt: 1 }, op2: { ar: 25, dr: 10, sr: 5, rr: 5, sl: 2, tl: 10, ks: 1, ml: 1, dt: 2 }, op3: { ar: 22, dr: 10, sr: 5, rr: 5, sl: 2, tl: 5, ks: 1, ml: 1, dt: 3 }, op4: { ar: 20, dr: 5, sr: 5, rr: 5, sl: 1, tl: 15, ks: 1, ml: 2, dt: 0 } },
+            piano: { fb: 3, alg: 4, op1: { ar: 31, dr: 20, sr: 5, rr: 5, sl: 4, tl: 0, ks: 2, ml: 1, dt: 0 }, op2: { ar: 31, dr: 25, sr: 10, rr: 5, sl: 8, tl: 10, ks: 2, ml: 4, dt: 0 }, op3: { ar: 31, dr: 15, sr: 5, rr: 5, sl: 4, tl: 0, ks: 2, ml: 1, dt: 0 }, op4: { ar: 31, dr: 20, sr: 10, rr: 5, sl: 8, tl: 20, ks: 2, ml: 8, dt: 0 } },
+            bass: { fb: 7, alg: 0, op1: { ar: 31, dr: 10, sr: 5, rr: 8, sl: 2, tl: 0, ks: 1, ml: 1, dt: 0 }, op2: { ar: 31, dr: 10, sr: 5, rr: 8, sl: 2, tl: 10, ks: 1, ml: 1, dt: 0 }, op3: { ar: 31, dr: 15, sr: 10, rr: 8, sl: 4, tl: 5, ks: 1, ml: 1, dt: 0 }, op4: { ar: 31, dr: 5, sr: 5, rr: 8, sl: 1, tl: 20, ks: 1, ml: 1, dt: 0 } },
+            strings: { fb: 0, alg: 5, op1: { ar: 10, dr: 5, sr: 0, rr: 10, sl: 0, tl: 0, ks: 0, ml: 1, dt: 1 }, op2: { ar: 12, dr: 5, sr: 0, rr: 10, sl: 0, tl: 10, ks: 0, ml: 1, dt: 2 }, op3: { ar: 10, dr: 5, sr: 0, rr: 10, sl: 0, tl: 5, ks: 0, ml: 1, dt: 5 }, op4: { ar: 15, dr: 5, sr: 0, rr: 10, sl: 0, tl: 20, ks: 0, ml: 1, dt: 6 } }
+        };
+
+        // ★楽器の自動判別ロジック
+        function getInstrument(num) {
+            if (fmInstruments[num]) return fmInstruments[num];
+            if (num === 23 || (num >= 20 && num <= 30)) return voiceBank.trumpet;
+            if (num === 10 || (num >= 1 && num <= 15)) return voiceBank.piano;
+            if (num >= 110 && num <= 120) return voiceBank.bass;
+            if (num >= 80 && num <= 95) return voiceBank.strings;
+            return fmInstruments[0] || voiceBank.default;
+        }
+
+        function log(msg, color = '#0f4') {
+            const d = document.getElementById('debugLog');
+            d.innerHTML += `<span style="color:${color}">${msg}</span><br>`;
+            d.scrollTop = d.scrollHeight;
+        }
+
+        const mixerBoard = document.getElementById('mixerBoard');
+        Object.keys(channelLabels).forEach(ch => {
+            const div = document.createElement('div'); div.className = 'channel';
+            let html = `<div>${channelLabels[ch]}<br><b>${ch}</b></div>`;
+            if (fmChannels.has(ch)) {
+                html += `
+                <div class="slider-container">
+                    <label>Mod Depth: <span id="mod-val-${ch}" class="val-disp">5</span></label>
+                    <input type="range" id="mod-${ch}" min="0" max="10" value="5" oninput="document.getElementById('mod-val-${ch}').innerText = this.value">
+                    <label>Env Speed: <span id="env-val-${ch}" class="val-disp">100</span></label>
+                    <input type="range" id="env-${ch}" min="10" max="200" value="100" oninput="document.getElementById('env-val-${ch}').innerText = this.value">
+                </div>
+                `;
+            } else {
+                html += `<div style="height: 70px;"></div>`;
+            }
+            html += `<button class="mute-btn" id="mute-${ch}" onclick="toggleMute('${ch}')">ON</button>`;
+            div.innerHTML = html;
+            mixerBoard.appendChild(div);
+        });
+
+        function toggleMute(ch) {
+            const btn = document.getElementById(`mute-${ch}`); const m = btn.classList.toggle('muted');
+            btn.textContent = m ? 'OFF' : 'ON';
+            if (channelGains[ch]) channelGains[ch].gain.setTargetAtTime(m ? 0 : 1, audioCtx ? audioCtx.currentTime : 0, 0.01);
+        }
+
+        async function initAudio() {
+            if (audioCtx) try { await audioCtx.close(); } catch (e) { }
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            Object.keys(channelLabels).forEach(ch => {
+                const g = audioCtx.createGain(); g.gain.value = document.getElementById(`mute-${ch}`).classList.contains('muted') ? 0 : 1;
+                g.connect(audioCtx.destination); channelGains[ch] = g;
+            });
+            noiseBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate, audioCtx.sampleRate);
+            const d = noiseBuffer.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+        }
+
+        function extractMacros(text) {
+            macros = {}; const regex = /#\s*\*(\d+)\s*\{([^}]*)\}/g;
+            let m; while ((m = regex.exec(text)) !== null) macros[m[1]] = m[2];
+        }
+
+        function extractInstruments(text) {
+            fmInstruments = { 0: defaultInst };
+            const regex = /@\s*%?\s*(\d+)\s*:\s*\{([^}]+)\}/g;
+            let m;
+            while ((m = regex.exec(text)) !== null) {
+                const instNum = parseInt(m[1]);
+                const nums = m[2].split(',').map(s => s.trim().replace(/"[^"]*"/g, '')).map(Number).filter(n => !isNaN(n));
+                if (nums.length >= 38) {
+                    fmInstruments[instNum] = {
+                        fb: nums[0], alg: nums[1],
+                        op1: { ar: nums[2], dr: nums[3], sr: nums[4], rr: nums[5], sl: nums[6], tl: nums[7], ks: nums[8], ml: nums[9], dt: nums[10] },
+                        op2: { ar: nums[11], dr: nums[12], sr: nums[13], rr: nums[14], sl: nums[15], tl: nums[16], ks: nums[17], ml: nums[18], dt: nums[19] },
+                        op3: { ar: nums[20], dr: nums[21], sr: nums[22], rr: nums[23], sl: nums[24], tl: nums[25], ks: nums[26], ml: nums[27], dt: nums[28] },
+                        op4: { ar: nums[29], dr: nums[30], sr: nums[31], rr: nums[32], sl: nums[33], tl: nums[34], ks: nums[35], ml: nums[36], dt: nums[37] }
+                    };
+                }
+            }
+        }
+
+        const addRange = (set, startIdx, endIdx) => { for (let k = startIdx; k <= endIdx; k++) set.add(k); };
+
+        async function parseAndPlay() {
+            if (animationId) cancelAnimationFrame(animationId);
+            currentMMLString = document.getElementById('mmlInput').value.replace(/\\/g, '¥').replace(/\r\n/g, '\n');
+            if (!currentMMLString) return;
+
+            extractMacros(currentMMLString);
+            extractInstruments(currentMMLString);
+
+            await initAudio();
+            isPlaying = true; charEvents = {}; noteIndices.clear();
+            charColors = new Uint8Array(currentMMLString.length);
+            charTicks = new Float64Array(currentMMLString.length);
+
+            for (let i = 0; i < currentMMLString.length; i++) {
+                charEvents[i] = []; charColors[i] = C_WHITE; charTicks[i] = 0.0;
+            }
+
+            const tempoMatch = currentMMLString.match(/[tT](\d+)/); currentTempo = tempoMatch ? parseInt(tempoMatch[1]) : 120;
+            startTime = audioCtx.currentTime + 0.5;
+            const isFMEnabled = document.getElementById('fmToggle').checked;
+
+            const displayArea = document.getElementById('visualDisplay'); displayArea.innerHTML = "";
+            let frag = document.createDocumentFragment();
+            for (let i = 0; i < currentMMLString.length; i++) {
+                let s = document.createElement('span'); s.id = `char-${i}`; s.className = 'note-span'; s.textContent = currentMMLString[i];
+                frag.appendChild(s);
+            }
+            displayArea.appendChild(frag);
+
+            Object.keys(channelLabels).forEach(ch => {
+                channelStates[ch] = { ticks: 0.0, octave: 4, v: 10, l: 4, q: 0.0, clock: 128.0, detune: 0.0, kshift: 0, loopStack: [], inst: 0, M: null, MF: 0, E: null, yTL: {}, vm: 0 };
+                if (ch === 'G') {
+                    channelStates[ch].v_bd = 31; channelStates[ch].v_sd = 31; channelStates[ch].v_cy = 31;
+                    channelStates[ch].v_hh = 31; channelStates[ch].v_tm = 31; channelStates[ch].v_ry = 31;
+                    channelStates[ch].v = 63;
+                }
+            });
+
+            const lines = currentMMLString.split('\n');
+            let offset = 0;
+
+            const setCol = (sIdx, eIdx, col) => { for (let k = sIdx; k <= eIdx; k++) charColors[k] = col; };
+            const addCharTicks = (idx, len, ticks) => {
+                if (len > 0) { let tp = ticks / len; for (let k = 0; k < len; k++) charTicks[idx + k] += tp; }
+            };
+
+            lines.forEach((line) => {
+                const mmlSource = line.split(';')[0].split(':')[0];
+                if (line.includes(';')) setCol(offset + line.indexOf(';'), offset + line.length - 1, C_YELLOW);
+                if (line.includes(':')) setCol(offset + line.indexOf(':'), offset + line.length - 1, C_YELLOW);
+
+                const m = mmlSource.match(/^([A-K])\s+(.*)/i);
+                if (m) {
+                    const chId = m[1].toUpperCase(), content = m[2], state = channelStates[chId], contentStartIdx = line.indexOf(m[2]);
+
+                    const tokenize = (str, startPos) => {
+                        const tokens = [];
+                        const regex = /("[^"]*"|[a-g][+\-#]?|[rvotT<>\[\]&/^()kqp@MmyEwCclL*DKk:;]|\d+|\.+|\$[0-9a-fA-F]+|[+-]|\,)|(\S)/g;
+                        let t; while ((t = regex.exec(str)) !== null) {
+                            const val = t[1] || t[0], gi = startPos + t.index;
+                            tokens.push({ val, idx: gi, len: val.length, isNote: /^[a-g][+\-#]?$/.test(val), isCmd: supportedCmds.has(val) });
+                        }
+                        return tokens;
+                    };
+
+                    const process = (tkns, uiOverrideIdx = -1, uiOverrideLen = 0) => {
+                        for (let i = 0; i < tkns.length; i++) {
+                            let t = tkns[i]; const lowVal = t.val.toLowerCase();
+                            let uiStart = uiOverrideIdx !== -1 ? uiOverrideIdx : t.idx;
+                            let uiLen = uiOverrideIdx !== -1 ? uiOverrideLen : t.len;
+
+                            const reg = (tk_idx, dur) => {
+                                if (!tkns[tk_idx]) return;
+                                const time = startTime + (state.ticks * (240 / (currentTempo * 0.75 * state.clock)));
+                                let u_s = uiOverrideIdx !== -1 ? uiOverrideIdx : tkns[tk_idx].idx;
+                                let u_l = uiOverrideIdx !== -1 ? uiOverrideLen : tkns[tk_idx].len;
+                                for (let k = 0; k < u_l; k++) charEvents[u_s + k].push({ time, end: time + dur });
+                            };
+
+                            if (t.val === '*') {
+                                let mId = ""; let origI = i; reg(i, 0.01);
+                                while (i + 1 < tkns.length && /^\d+$/.test(tkns[i + 1].val)) { i++; mId += tkns[i].val; reg(i, 0.01); }
+                                let mStart = tkns[origI].idx; let mLen = (tkns[i].idx + tkns[i].len) - mStart;
+                                setCol(mStart, mStart + mLen - 1, C_WHITE);
+                                if (macros[mId]) process(tokenize(macros[mId], t.idx), mStart, mLen);
+                                continue;
+                            }
+
+                            if (t.isNote || lowVal === 'r') {
+                                let evIdxs = []; let totalNoteTicks = 0.0;
+                                const parseLenSegment = (idx) => {
+                                    let baseLen = state.l; let cIdx = idx; let isJustDots = tkns[cIdx].val.startsWith('.');
+                                    if (!isJustDots) {
+                                        if (/^\d+/.test(tkns[cIdx].val)) baseLen = parseFloat(tkns[cIdx].val);
+                                        else if (cIdx + 1 < tkns.length && /^\d+/.test(tkns[cIdx + 1].val)) { cIdx++; baseLen = parseFloat(tkns[cIdx].val); evIdxs.push(cIdx); }
+                                    }
+                                    let bt = state.clock / baseLen; let segTicks = isJustDots ? 0 : bt; let nextAdd = bt / 2;
+                                    if (isJustDots) { for (let d = 0; d < tkns[cIdx].len; d++) { segTicks += nextAdd; nextAdd /= 2; } }
+                                    while (cIdx + 1 < tkns.length && tkns[cIdx + 1].val.startsWith('.')) {
+                                        cIdx++; for (let d = 0; d < tkns[cIdx].len; d++) { segTicks += nextAdd; nextAdd /= 2; } evIdxs.push(cIdx);
+                                    }
+                                    return { t: segTicks, ni: cIdx };
+                                };
+                                evIdxs.push(i); let nInf = parseLenSegment(i); totalNoteTicks += nInf.t; i = nInf.ni;
+                                while (i + 1 < tkns.length && (tkns[i + 1].val === '&' || tkns[i + 1].val === '^')) {
+                                    i++; evIdxs.push(i);
+                                    if (i + 1 < tkns.length) {
+                                        if (tkns[i + 1].isNote || tkns[i + 1].val.toLowerCase() === 'r') { i++; evIdxs.push(i); let nx = parseLenSegment(i); totalNoteTicks += nx.t; i = nx.ni; }
+                                        else if (/^\d/.test(tkns[i + 1].val) || tkns[i + 1].val.startsWith('.')) { i++; evIdxs.push(i); let nx = parseLenSegment(i); totalNoteTicks += nx.t; i = nx.ni; }
+                                        else break;
+                                    } else break;
+                                }
+                                const time = startTime + (state.ticks * (240 / (currentTempo * 0.75 * state.clock)));
+                                const durF = totalNoteTicks * (240 / (currentTempo * 0.75 * state.clock));
+
+                                if (lowVal !== 'r') {
+                                    const masterPitchRaw = parseFloat(document.getElementById('master-pitch').value) || 0;
+                                    const masterPitch = Math.pow(10, masterPitchRaw);
+
+                                    const appliedPitch = fmChannels.has(chId) ? masterPitch : 1.0;
+
+                                    const f = (440 * Math.pow(2, (notesMap[lowVal] + (state.octave - 4) * 12 + state.kshift) / 12) + (state.detune * 0.1)) * appliedPitch;
+
+                                    const qO = (state.q * (240 / (currentTempo * 0.75 * state.clock)));
+                                    const playDur = Math.max(0.001, durF - qO);
+
+                                    if (chId === 'G') {
+                                        playDrum(time, state, masterPitch);
+                                    } else if (fmChannels.has(chId) && isFMEnabled) {
+                                        playFM(f, time, playDur, state, chId);
+                                    } else {
+                                        playPSG(f, time, playDur, state, chId);
+                                    }
+                                }
+                                addCharTicks(uiStart, uiLen, totalNoteTicks);
+                                evIdxs.forEach(idx => {
+                                    let tok = tkns[idx]; let u_s = uiOverrideIdx !== -1 ? uiOverrideIdx : tok.idx; let u_l = uiOverrideIdx !== -1 ? uiOverrideLen : tok.len;
+                                    addRange(noteIndices, u_s, u_s + u_l - 1);
+                                    for (let k = 0; k < u_l; k++) charEvents[u_s + k].push({ time, end: time + durF });
+                                });
+                                state.ticks += totalNoteTicks;
+                            }
+                            else {
+                                let cmdChar = t.val; let isM = cmdChar === 'M'; let isV = cmdChar === 'v'; let isY = cmdChar === 'y'; let origI = i;
+
+                                if (isM && tkns[i + 1] && ['F', 'W', 'C', 'L', 'D'].includes(tkns[i + 1].val)) {
+                                    i++; cmdChar = 'M' + tkns[i].val;
+                                }
+                                else if (isV && tkns[i + 1]?.val === 'm') { i++; cmdChar = 'vm'; }
+                                else if (isY && tkns[i + 1] && tkns[i + 2]) {
+                                    let combo = tkns[i + 1].val + tkns[i + 2].val;
+                                    if (['DM', 'TL', 'KA', 'DR', 'SR', 'SL', 'SE'].includes(combo)) { i += 2; cmdChar = 'y' + combo; }
+                                }
+
+                                let args = [];
+                                while (i + 1 < tkns.length) {
+                                    let nx = tkns[i + 1];
+                                    if (nx.isNote || /^[a-zA-Z@*\[\]/&^()<>:;]/.test(nx.val)) break;
+                                    if (/^[0-9,.\-\+\$]+/.test(nx.val) || nx.val.startsWith('"')) { i++; args.push(nx.val); } else break;
+                                }
+
+                                let isSupported = supportedCmds.has(t.val) || ['vm', 'yTL'].includes(cmdChar);
+                                if (t.val === 'M' && !['M', 'MF'].includes(cmdChar)) isSupported = false;
+                                if (t.val === 'y' && cmdChar !== 'yTL') isSupported = false;
+
+                                let u_s = uiOverrideIdx !== -1 ? uiOverrideIdx : tkns[origI].idx;
+                                let realEndIdx = tkns[i].idx + tkns[i].len - 1;
+                                let u_e = uiOverrideIdx !== -1 ? uiOverrideIdx + uiOverrideLen - 1 : realEndIdx;
+                                setCol(u_s, u_e, isSupported ? C_WHITE : C_RED);
+                                for (let k = origI; k <= i; k++) reg(k, 0.01);
+
+                                if (isSupported) {
+                                    let argString = args.join('');
+                                    let multiArgs = argString.split(',').map(a => a.trim()).filter(a => a !== "").map(a => parseFloat(a));
+
+                                    if (cmdChar === 'C' && multiArgs.length) state.clock = multiArgs[0];
+                                    if (cmdChar === 'q' && multiArgs.length) state.q = multiArgs[0];
+                                    if (cmdChar === 'l' && multiArgs.length) state.l = multiArgs[0];
+                                    if (cmdChar === 'o' && multiArgs.length) state.octave = multiArgs[0];
+
+                                    if (cmdChar === 'M' && multiArgs.length) state.M = multiArgs;
+                                    if (cmdChar === 'MF' && multiArgs.length) state.MF = multiArgs[0];
+                                    if (cmdChar === 'E' && multiArgs.length) state.E = multiArgs;
+
+                                    if (cmdChar === 'vm' && multiArgs.length) state.vm = multiArgs[0];
+                                    if (cmdChar === 'yTL' && multiArgs.length >= 2) state.yTL[multiArgs[0]] = multiArgs[1];
+
+                                    if (cmdChar === 'v') {
+                                        if (chId === 'G' && multiArgs.length > 1) {
+                                            state.v = multiArgs[0];
+                                            if (multiArgs[1] !== undefined) state.v_bd = multiArgs[1];
+                                            if (multiArgs[2] !== undefined) state.v_sd = multiArgs[2];
+                                            if (multiArgs[3] !== undefined) state.v_cy = multiArgs[3];
+                                            if (multiArgs[4] !== undefined) state.v_hh = multiArgs[4];
+                                            if (multiArgs[5] !== undefined) state.v_tm = multiArgs[5];
+                                            if (multiArgs[6] !== undefined) state.v_ry = multiArgs[6];
+                                        } else if (multiArgs.length) {
+                                            state.v = multiArgs[0];
+                                        }
+                                    }
+                                    if (cmdChar.toLowerCase() === 't' && multiArgs.length) currentTempo = multiArgs[0];
+                                    if (cmdChar === '@' && multiArgs.length) state.inst = multiArgs[0];
+                                    if (cmdChar === 'D') {
+                                        let vStr = args.join(''); let val = parseInt(vStr) || 0;
+                                        if (vStr.startsWith('+') || vStr.startsWith('-')) state.detune += val; else state.detune = val;
+                                    }
+                                    if (cmdChar === 'K') state.kshift = parseInt(args.join('')) || 0;
+                                    if (cmdChar === 'k') state.kshift += parseInt(args.join('')) || 0;
+                                    if (cmdChar === '(' || cmdChar === ')') {
+                                        let dir = cmdChar === '(' ? -1 : 1; let step = multiArgs.length ? multiArgs[0] : 1;
+                                        state.v = Math.max(0, Math.min(127, state.v + dir * step));
+                                    }
+                                    if (cmdChar === '[') {
+                                        let max = multiArgs.length ? multiArgs[0] : 2;
+                                        let d = 0, ei = -1; for (let j = i + 1; j < tkns.length; j++) { if (tkns[j].val === '[') d++; else if (tkns[j].val === ']') { if (d === 0) { ei = j; break; } d--; } }
+                                        if (ei !== -1 && tkns[ei + 1] && /^\d+$/.test(tkns[ei + 1].val)) max = parseInt(tkns[ei + 1].val);
+                                        state.loopStack.push({ startIdx: i, endIdx: ei, count: 0, max });
+                                    }
+                                    if (cmdChar === '/') { let l = state.loopStack[state.loopStack.length - 1]; if (l && l.count === l.max - 1) i = l.endIdx - 1; }
+                                    if (cmdChar === ']') { let l = state.loopStack[state.loopStack.length - 1]; if (l) { l.count++; if (l.count < l.max) i = l.startIdx; else { state.loopStack.pop(); } } }
+                                }
+                            }
+                        }
+                    };
+                    process(tokenize(content, offset + contentStartIdx));
+                } else if (line.trim().startsWith('#') || line.trim().startsWith('@')) {
+                    setCol(offset, offset + line.length - 1, C_YELLOW);
+                }
+                offset += line.length + 1;
+            });
+
+            log("Playback Started.", "#0f4");
+            animationId = requestAnimationFrame(draw);
+        }
+
+        function applySoftwareEnvelope(ctx, masterGainNode, state, t, d) {
+            const finalNode = ctx.createGain();
+            if (state.E && state.E.length >= 4) {
+                const al = state.E[0] || 0; const dd = state.E[1] || 0;
+                const sr = state.E[2] || 0; const rr = state.E[3] || 0;
+                const sl = state.E[4] !== undefined ? state.E[4] : 255;
+
+                const arTime = al >= 255 ? 0.005 : (256 - al) * 0.005;
+                const drTime = dd >= 255 ? 0.005 : (256 - dd) * 0.005;
+                const slLevel = Math.max(0.001, sl / 255.0);
+                const rrTimeEG = rr >= 255 ? 0.005 : (256 - rr) * 0.005;
+
+                finalNode.gain.setValueAtTime(0.001, t);
+                finalNode.gain.linearRampToValueAtTime(1.0, t + arTime);
+                finalNode.gain.exponentialRampToValueAtTime(slLevel, t + arTime + drTime);
+
+                finalNode.gain.cancelAndHoldAtTime(t + d);
+                finalNode.gain.exponentialRampToValueAtTime(0.001, t + d + rrTimeEG);
+            } else {
+                finalNode.gain.value = 1.0;
+            }
+            masterGainNode.connect(finalNode);
+            return finalNode;
+        }
+
+        function applyLFO(ctx, t, d, state, oscillators, masterGainNode) {
+            const lfo = ctx.createOscillator();
+            lfo.type = 'sine';
+            const speed = state.M[1];
+            lfo.frequency.value = (speed / 255.0) * 15.0 + 1.0;
+
+            const lfoGain = ctx.createGain();
+            const delayTime = (state.M[0] / 255.0) * 1.5;
+
+            lfoGain.gain.setValueAtTime(0, t);
+            lfoGain.gain.setValueAtTime(0, t + delayTime);
+
+            if (state.MF === 1) {
+                const depth = Math.abs(state.M[2]) / 255.0;
+                lfoGain.gain.linearRampToValueAtTime(depth, t + delayTime + 0.05);
+                lfo.connect(lfoGain);
+                lfoGain.connect(masterGainNode.gain);
+            } else {
+                const depth = state.M[2] * 0.5;
+                lfoGain.gain.linearRampToValueAtTime(depth, t + delayTime + 0.05);
+                lfo.connect(lfoGain);
+                oscillators.forEach(osc => lfoGain.connect(osc.detune));
+            }
+            lfo.start(t); lfo.stop(t + d + 2.0);
+        }
+
+        function playPSG(f, t, d, state, ch) {
+            if (isNaN(f) || f <= 0) return;
+            const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+            o.type = 'square'; o.frequency.setValueAtTime(f, t);
+
+            g.gain.setValueAtTime(0, t);
+            g.gain.linearRampToValueAtTime(Math.max(0, state.v) * 0.01, t + 0.005);
+            g.gain.exponentialRampToValueAtTime(0.001, t + d);
+
+            const finalOut = applySoftwareEnvelope(audioCtx, g, state, t, d);
+            finalOut.connect(channelGains[ch]);
+
+            if (state.M && state.M.length >= 3) applyLFO(audioCtx, t, d, state, [o], g);
+
+            o.connect(g); o.start(t); o.stop(t + d);
+        }
+
+        function playFM(f, t, d, state, ch) {
+            if (isNaN(f) || f <= 0) return;
+
+            const instNum = state.inst;
+            const modSlider = document.getElementById(`mod-${ch}`);
+            const envSlider = document.getElementById(`env-${ch}`);
+            const modDepthMultiplier = modSlider ? parseInt(modSlider.value) / 100.0 : 0.05;
+            const envSpeedMultiplier = envSlider ? parseInt(envSlider.value) / 100.0 : 1.0;
+
+            // ★変更：定義済みの楽器か、内蔵プリセットから取得する
+            const inst = getInstrument(instNum);
+
+            const calcFreq = (ml, baseF) => baseF * (ml === 0 ? 0.5 : ml);
+            const getDetune = (dt) => {
+                if (dt === 1) return 1.5; if (dt === 2) return 3; if (dt === 3) return 5;
+                if (dt === 5) return -1.5; if (dt === 6) return -3; if (dt === 7) return -5;
+                return 0;
+            };
+
+            const toTime = (rate) => {
+                const baseTime = rate >= 31 ? 0.005 : (32 - rate) * 0.05;
+                return baseTime / envSpeedMultiplier;
+            };
+
+            const applyHardwareEnvelope = (gainParam, op, baseVol) => {
+                const ksMultiplier = 1.0 + (op.ks * (f / 1000.0));
+                const arTime = Math.max(0.005, toTime(op.ar) / ksMultiplier);
+                const drTime = toTime(op.dr) / ksMultiplier;
+                const srTime = op.sr === 0 ? 100 : (toTime(op.sr) * 5) / ksMultiplier;
+                const rrTime = toTime(op.rr);
+                const slLevel = Math.max(0.0001, baseVol * (1.0 - (op.sl / 15)));
+
+                gainParam.cancelScheduledValues(t);
+                gainParam.setValueAtTime(0.0001, t);
+                gainParam.linearRampToValueAtTime(Math.max(0.0001, baseVol), t + arTime);
+                const decayEnd = t + arTime + drTime;
+                gainParam.exponentialRampToValueAtTime(Math.max(0.0001, slLevel), decayEnd);
+                const noteOffTime = t + d;
+                gainParam.exponentialRampToValueAtTime(Math.max(0.0001, slLevel * 0.1), decayEnd + srTime);
+                gainParam.cancelAndHoldAtTime(noteOffTime);
+                gainParam.exponentialRampToValueAtTime(0.0001, noteOffTime + rrTime);
+                return rrTime;
+            };
+
+            const ops = [1, 2, 3, 4].map(i => {
+                const opData = { ...inst[`op${i}`] };
+                if (state.yTL && state.yTL[i] !== undefined) {
+                    opData.tl = state.yTL[i];
+                }
+
+                const osc = audioCtx.createOscillator();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(calcFreq(opData.ml, f) + getDetune(opData.dt), t);
+
+                const eg = audioCtx.createGain();
+                const peakLevel = Math.max(0.0001, Math.pow(1 - (opData.tl / 127), 2));
+                const rrTime = applyHardwareEnvelope(eg.gain, opData, peakLevel);
+                osc.connect(eg);
+
+                const modGain = audioCtx.createGain();
+                modGain.gain.value = f * 0.8 * modDepthMultiplier;
+                eg.connect(modGain);
+
+                return { osc, eg, modGain, rrTime };
+            });
+
+            const [op1, op2, op3, op4] = ops;
+
+            if (inst.fb > 0) {
+                op1.modGain.connect(op1.osc.frequency);
+                op1.modGain.gain.value *= (inst.fb / 7.0);
+            }
+
+            const masterGain = audioCtx.createGain();
+            masterGain.gain.setValueAtTime(Math.max(0, state.v) * 0.010, t);
+
+            const finalOut = applySoftwareEnvelope(audioCtx, masterGain, state, t, d);
+            finalOut.connect(channelGains[ch]);
+
+            const routeMod = (src, dest) => src.modGain.connect(dest.osc.frequency);
+            const routeOut = (src) => src.eg.connect(masterGain);
+
+            switch (inst.alg) {
+                case 1: routeMod(op1, op3); routeMod(op2, op3); routeMod(op3, op4); routeOut(op4); break;
+                case 2: routeMod(op1, op4); routeMod(op2, op3); routeMod(op3, op4); routeOut(op4); break;
+                case 3: routeMod(op1, op2); routeMod(op2, op4); routeMod(op3, op4); routeOut(op4); break;
+                case 4: routeMod(op1, op2); routeMod(op3, op4); routeOut(op2); routeOut(op4); break;
+                case 5: routeMod(op1, op2); routeMod(op1, op3); routeMod(op1, op4); routeOut(op2); routeOut(op3); routeOut(op4); break;
+                case 6: routeMod(op1, op2); routeOut(op2); routeOut(op3); routeOut(op4); break;
+                case 7: routeOut(op1); routeOut(op2); routeOut(op3); routeOut(op4); break;
+                case 0:
+                default: routeMod(op1, op2); routeMod(op2, op3); routeMod(op3, op4); routeOut(op4); break;
+            }
+
+            if (state.M && state.M.length >= 3) {
+                applyLFO(audioCtx, t, d, state, [op1.osc, op2.osc, op3.osc, op4.osc], masterGain);
+            }
+
+            const maxRR = Math.max(op1.rrTime, op2.rrTime, op3.rrTime, op4.rrTime);
+            const stopTime = t + d + maxRR;
+
+            op1.osc.start(t); op2.osc.start(t); op3.osc.start(t); op4.osc.start(t);
+            op1.osc.stop(stopTime); op2.osc.stop(stopTime); op3.osc.stop(stopTime); op4.osc.stop(stopTime);
+        }
+
+        function playDrum(t, state, pitchMult) {
+            const inst = state.inst;
+            const masterVol = (state.v / 63.0) * 0.25;
+
+            if (inst & 1) { // Bass Drum
+                const vol = (state.v_bd / 31.0) * masterVol * 3.0;
+                const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+                o.frequency.setValueAtTime(200 * pitchMult, t); o.frequency.exponentialRampToValueAtTime(40 * pitchMult, t + 0.05);
+                g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+                o.connect(g).connect(channelGains['G']); o.start(t); o.stop(t + 0.08);
+            }
+            if (inst & 2) { // Snare Drum
+                const vol = (state.v_sd / 31.0) * masterVol * 1.8;
+                const s = audioCtx.createBufferSource(); const g = audioCtx.createGain(); const f = audioCtx.createBiquadFilter();
+                s.buffer = noiseBuffer; f.type = 'highpass'; f.frequency.value = 1000 * pitchMult;
+                g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+                s.connect(f).connect(g).connect(channelGains['G']); s.start(t); s.stop(t + 0.12);
+            }
+            if (inst & 4) { // Cymbal
+                const vol = (state.v_cy / 31.0) * masterVol * 1.4;
+                const s = audioCtx.createBufferSource(); const g = audioCtx.createGain(); const f = audioCtx.createBiquadFilter();
+                s.buffer = noiseBuffer; f.type = 'highpass'; f.frequency.value = 4000 * pitchMult;
+                g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.6);
+                s.connect(f).connect(g).connect(channelGains['G']); s.start(t); s.stop(t + 0.6);
+            }
+            if (inst & 8) { // Hi-Hat
+                const vol = (state.v_hh / 31.0) * masterVol * 1.2;
+                const s = audioCtx.createBufferSource(); const g = audioCtx.createGain(); const f = audioCtx.createBiquadFilter();
+                s.buffer = noiseBuffer; f.type = 'highpass'; f.frequency.value = 6000 * pitchMult;
+                g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+                s.connect(f).connect(g).connect(channelGains['G']); s.start(t); s.stop(t + 0.04);
+            }
+            if (inst & 16) { // Tom
+                const vol = (state.v_tm / 31.0) * masterVol * 2.0;
+                const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+                o.frequency.setValueAtTime(450 * pitchMult, t); o.frequency.exponentialRampToValueAtTime(120 * pitchMult, t + 0.1);
+                g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+                o.connect(g).connect(channelGains['G']); o.start(t); o.stop(t + 0.1);
+            }
+            if (inst & 32) { // Rimshot
+                const vol = (state.v_ry / 31.0) * masterVol * 2.2;
+                const s = audioCtx.createBufferSource(); const g = audioCtx.createGain(); const f = audioCtx.createBiquadFilter();
+                s.buffer = noiseBuffer; f.type = 'bandpass'; f.frequency.value = 3500 * pitchMult; f.Q.value = 12;
+                g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.025);
+                s.connect(f).connect(g).connect(channelGains['G']); s.start(t); s.stop(t + 0.025);
+            }
+        }
+
+        function draw() {
+            if (!isPlaying || !audioCtx) return; const now = audioCtx.currentTime;
+            for (let i = 0; i < currentMMLString.length; i++) {
+                const evs = charEvents[i]; const el = document.getElementById(`char-${i}`); if (!el) continue;
+                let charState = 'idle';
+                if (evs && evs.length) {
+                    for (let e of evs) {
+                        if (now >= e.time && now <= e.end) { charState = 'active'; break; }
+                        else if (now > e.end) charState = 'played';
+                        else if (now < e.time && charState === 'played') { charState = 'idle'; break; }
+                    }
+                }
+                let targetClass = 'note-span'; let col = charColors[i];
+                if (col === C_RED) targetClass += ' hl-red'; else if (col === C_YELLOW) targetClass += ' hl-warning';
+                if (charState === 'active') targetClass += ' hl-active'; else if (charState === 'played' && noteIndices.has(i) && col !== C_RED && col !== C_YELLOW) targetClass += ' hl-played';
+                if (el.className !== targetClass) el.className = targetClass;
+            }
+            const ticks = (now - startTime) / (240 / (currentTempo * 0.75 * 128.0));
+            if (ticks > 0) document.getElementById('measureDisplay').textContent = `MEASURE: ${Math.floor(ticks / 128) + 1}`;
+            animationId = requestAnimationFrame(draw);
+        }
+
+        document.getElementById('playBtn').onclick = () => parseAndPlay();
+        document.getElementById('fileInput').onchange = (e) => {
+            const r = new FileReader(); r.onload = (ev) => { document.getElementById('mmlInput').value = ev.target.result; log("MML Loaded."); };
+            r.readAsText(e.target.files[0]);
+        };
+    </script>
+</body>
+
+</html>

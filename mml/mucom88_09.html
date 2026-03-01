@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>MUCOM88 Visual Engine v51.0 (Clean Build)</title>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            background: #050505;
+            color: #eee;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            border: 1px solid #00ff41;
+            padding: 20px;
+            box-shadow: 0 0 20px #004411;
+        }
+
+        .status-bar {
+            background: #111;
+            padding: 10px;
+            border: 1px solid #333;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 16px;
+            color: #0f4;
+        }
+
+        .mixer {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(85px, 1fr));
+            gap: 5px;
+            margin-bottom: 15px;
+        }
+
+        .channel {
+            background: #111;
+            border: 1px solid #222;
+            padding: 5px;
+            text-align: center;
+            font-size: 10px;
+        }
+
+        .mute-btn {
+            width: 100%;
+            margin-top: 5px;
+            cursor: pointer;
+            background: #003300;
+            color: #0f4;
+            border: 1px solid #0f4;
+            font-size: 10px;
+        }
+
+        .mute-btn.muted {
+            background: #330000;
+            color: #f00;
+            border-color: #f00;
+        }
+
+        textarea {
+            width: 100%;
+            height: 80px;
+            background: #000;
+            color: #0f4;
+            border: 1px solid #0f4;
+            padding: 10px;
+            font-size: 12px;
+            margin-bottom: 10px;
+        }
+
+        #visualDisplay {
+            width: 100%;
+            height: 400px;
+            background: #000;
+            border: 1px solid #222;
+            padding: 10px;
+            overflow-y: scroll;
+            white-space: pre-wrap;
+            word-break: break-all;
+            font-size: 11px;
+            line-height: 1.6;
+        }
+
+        .note-span {
+            color: #ffffff;
+        }
+
+        .hl-warning {
+            color: #ffff00 !important;
+            font-weight: bold;
+        }
+
+        .hl-red {
+            color: #ff3333 !important;
+            font-weight: bold;
+            text-decoration: underline;
+        }
+
+        .hl-played {
+            color: #555555 !important;
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .hl-active {
+            color: #ffffff !important;
+            background: #008800 !important;
+            font-weight: bold;
+            box-shadow: 0 0 8px #0f4;
+        }
+
+        #debugLog {
+            width: 100%;
+            height: 150px;
+            background: #000;
+            color: #0f4;
+            border: 1px solid #333;
+            overflow-y: scroll;
+            padding: 10px;
+            font-size: 11px;
+            margin-top: 10px;
+        }
+
+        button#playBtn {
+            background: #0f4;
+            color: #000;
+            border: none;
+            padding: 10px 25px;
+            font-weight: bold;
+            cursor: pointer;
+            width: 100%;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>MUCOM88 PSG ENGINE v51.0 (Clean Build)</h1>
+        <div class="status-bar">
+            <div id="measureDisplay">MEASURE: -- / --</div>
+            <div id="tempoDisplay">TEMPO: --- (0.75x Speed)</div>
+        </div>
+        <div class="mixer" id="mixerBoard"></div>
+        <textarea id="mmlInput" placeholder="MMLを貼り付けてください"></textarea>
+        <div id="visualDisplay"></div>
+        <div id="debugLog">--- System Log ---<br></div>
+        <div class="controls">
+            <input type="file" id="fileInput" accept=".muc,.txt">
+            <button id="playBtn">STOP & PLAY (25% SLOW)</button>
+        </div>
+    </div>
+    <script>
+        let audioCtx, noiseBuffer, currentMMLString = "";
+        let channelStates = {}, channelGains = {}, charEvents = {}, charColors = new Uint8Array(0), charTicks = new Float64Array(0), noteIndices = new Set(), macros = {};
+        let startTime = 0, currentTempo = 120, isPlaying = false, animationId;
+        const notesMap = { 'c': 0, 'c+': 1, 'c#': 1, 'd-': 1, 'd': 2, 'd+': 3, 'd#': 3, 'e-': 3, 'e': 4, 'f': 5, 'f+': 6, 'f#': 6, 'g-': 6, 'g': 7, 'g+': 8, 'g#': 8, 'a-': 8, 'a': 9, 'a+': 10, 'a#': 10, 'b-': 10, 'b': 11 };
+        const channelLabels = { 'A': 'FM1', 'B': 'FM2', 'C': 'FM3', 'D': 'SSG1', 'E': 'SSG2', 'F': 'SSG3', 'G': 'RHYTHM', 'H': 'FM4', 'I': 'FM5', 'J': 'FM6', 'K': 'PCM' };
+        const supportedCmds = new Set(['T', 't', 'o', 'v', 'l', 'L', 'q', 'p', 'C', '[', ']', '/', '&', '^', '(', ')', '<', '>', 'r', '*', 'D', 'K', 'k', ':', ';', '@']);
+        const C_WHITE = 1, C_YELLOW = 2, C_RED = 3;
+        const escapeHTML = str => str.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+        function log(msg, color = '#0f4') {
+            const d = document.getElementById('debugLog');
+            d.innerHTML += `<span style="color:${color}">${msg}</span><br>`;
+            d.scrollTop = d.scrollHeight;
+        }
+
+        const mixerBoard = document.getElementById('mixerBoard');
+        Object.keys(channelLabels).forEach(ch => {
+            const div = document.createElement('div'); div.className = 'channel';
+            div.innerHTML = `${channelLabels[ch]}<br><b>${ch}</b><button class="mute-btn" id="mute-${ch}" onclick="toggleMute('${ch}')">ON</button>`;
+            mixerBoard.appendChild(div);
+        });
+
+        function toggleMute(ch) {
+            const btn = document.getElementById(`mute-${ch}`); const m = btn.classList.toggle('muted');
+            btn.textContent = m ? 'OFF' : 'ON';
+            if (channelGains[ch]) channelGains[ch].gain.setTargetAtTime(m ? 0 : 1, audioCtx ? audioCtx.currentTime : 0, 0.01);
+        }
+
+        async function initAudio() {
+            if (audioCtx) try { await audioCtx.close(); } catch (e) { }
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            Object.keys(channelLabels).forEach(ch => {
+                const g = audioCtx.createGain(); g.gain.value = document.getElementById(`mute-${ch}`).classList.contains('muted') ? 0 : 1;
+                g.connect(audioCtx.destination); channelGains[ch] = g;
+            });
+            noiseBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate, audioCtx.sampleRate);
+            const d = noiseBuffer.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+        }
+
+        function extractMacros(text) {
+            macros = {}; const regex = /#\s*\*(\d+)\s*\{([^}]*)\}/g;
+            let m; while ((m = regex.exec(text)) !== null) macros[m[1]] = m[2];
+        }
+
+        const addRange = (set, startIdx, endIdx) => { for (let k = startIdx; k <= endIdx; k++) set.add(k); };
+
+        async function parseAndPlay() {
+            if (animationId) cancelAnimationFrame(animationId);
+            currentMMLString = document.getElementById('mmlInput').value.replace(/\\/g, '¥').replace(/\r\n/g, '\n');
+            if (!currentMMLString) return;
+            extractMacros(currentMMLString); await initAudio();
+            isPlaying = true; charEvents = {}; noteIndices.clear();
+            charColors = new Uint8Array(currentMMLString.length);
+            charTicks = new Float64Array(currentMMLString.length);
+
+            for (let i = 0; i < currentMMLString.length; i++) {
+                charEvents[i] = []; charColors[i] = C_WHITE; charTicks[i] = 0.0;
+            }
+
+            const tempoMatch = currentMMLString.match(/[tT](\d+)/); currentTempo = tempoMatch ? parseInt(tempoMatch[1]) : 120;
+            startTime = audioCtx.currentTime + 0.5;
+
+            const displayArea = document.getElementById('visualDisplay'); displayArea.innerHTML = "";
+            let frag = document.createDocumentFragment();
+            for (let i = 0; i < currentMMLString.length; i++) {
+                let s = document.createElement('span'); s.id = `char-${i}`; s.className = 'note-span'; s.textContent = currentMMLString[i];
+                frag.appendChild(s);
+            }
+            displayArea.appendChild(frag);
+
+            Object.keys(channelLabels).forEach(ch => {
+                channelStates[ch] = { ticks: 0.0, octave: 4, v: 10, l: 4, q: 0.0, clock: 128.0, detune: 0.0, kshift: 0, loopStack: [], inst: 0 };
+                if (ch === 'G') {
+                    channelStates[ch].v_bd = 31; channelStates[ch].v_sd = 31; channelStates[ch].v_cy = 31;
+                    channelStates[ch].v_hh = 31; channelStates[ch].v_tm = 31; channelStates[ch].v_ry = 31;
+                    channelStates[ch].v = 63;
+                }
+            });
+
+            const lines = currentMMLString.split('\n');
+            let offset = 0;
+            let allChunks = [];
+
+            const setCol = (sIdx, eIdx, col) => { for (let k = sIdx; k <= eIdx; k++) charColors[k] = col; };
+            const addCharTicks = (idx, len, ticks) => {
+                if (len > 0) { let tp = ticks / len; for (let k = 0; k < len; k++) charTicks[idx + k] += tp; }
+            };
+
+            lines.forEach((line) => {
+                const mmlSource = line.split(';')[0].split(':')[0];
+                if (line.includes(';')) setCol(offset + line.indexOf(';'), offset + line.length - 1, C_YELLOW);
+                if (line.includes(':')) setCol(offset + line.indexOf(':'), offset + line.length - 1, C_YELLOW);
+
+                const m = mmlSource.match(/^([A-K])\s+(.*)/i);
+                if (m) {
+                    const chId = m[1].toUpperCase(), content = m[2], state = channelStates[chId], contentStartIdx = line.indexOf(m[2]);
+                    let lineChunks = [];
+                    const chunkRegex = /(\S+)/g; let cmatch;
+                    while ((cmatch = chunkRegex.exec(content)) !== null) {
+                        lineChunks.push({ text: cmatch[1], start: offset + contentStartIdx + cmatch.index, end: offset + contentStartIdx + cmatch.index + cmatch[1].length });
+                    }
+                    allChunks.push({ chId: chId, chunks: lineChunks, getClock: () => state.clock });
+
+                    const tokenize = (str, startPos) => {
+                        const tokens = [];
+                        const regex = /("[^"]*"|[a-g][+\-#]?|[rvotT<>\[\]&/^()kqp@MmyEwCclL*DKk:;]|\d+|\.+|\$[0-9a-fA-F]+|[+-]|\,)|(\S)/g;
+                        let t; while ((t = regex.exec(str)) !== null) {
+                            const val = t[1] || t[0], gi = startPos + t.index;
+                            tokens.push({ val, idx: gi, len: val.length, isNote: /^[a-g][+\-#]?$/.test(val), isCmd: supportedCmds.has(val) });
+                        }
+                        return tokens;
+                    };
+
+                    const process = (tkns, uiOverrideIdx = -1, uiOverrideLen = 0) => {
+                        for (let i = 0; i < tkns.length; i++) {
+                            let t = tkns[i]; const lowVal = t.val.toLowerCase();
+                            let uiStart = uiOverrideIdx !== -1 ? uiOverrideIdx : t.idx;
+                            let uiLen = uiOverrideIdx !== -1 ? uiOverrideLen : t.len;
+
+                            const reg = (tk_idx, dur) => {
+                                if (!tkns[tk_idx]) return;
+                                const time = startTime + (state.ticks * (240 / (currentTempo * 0.75 * state.clock)));
+                                let u_s = uiOverrideIdx !== -1 ? uiOverrideIdx : tkns[tk_idx].idx;
+                                let u_l = uiOverrideIdx !== -1 ? uiOverrideLen : tkns[tk_idx].len;
+                                for (let k = 0; k < u_l; k++) charEvents[u_s + k].push({ time, end: time + dur });
+                            };
+
+                            if (t.val === '*') {
+                                let mId = ""; let origI = i; reg(i, 0.01);
+                                while (i + 1 < tkns.length && /^\d+$/.test(tkns[i + 1].val)) { i++; mId += tkns[i].val; reg(i, 0.01); }
+                                let mStart = tkns[origI].idx; let mLen = (tkns[i].idx + tkns[i].len) - mStart;
+                                setCol(mStart, mStart + mLen - 1, C_WHITE);
+                                if (macros[mId]) process(tokenize(macros[mId], t.idx), mStart, mLen);
+                                continue;
+                            }
+
+                            if (t.isNote || lowVal === 'r') {
+                                let evIdxs = []; let totalNoteTicks = 0.0;
+                                const parseLenSegment = (idx) => {
+                                    let baseLen = state.l; let cIdx = idx; let isJustDots = tkns[cIdx].val.startsWith('.');
+                                    if (!isJustDots) {
+                                        if (/^\d+/.test(tkns[cIdx].val)) baseLen = parseFloat(tkns[cIdx].val);
+                                        else if (cIdx + 1 < tkns.length && /^\d+/.test(tkns[cIdx + 1].val)) { cIdx++; baseLen = parseFloat(tkns[cIdx].val); evIdxs.push(cIdx); }
+                                    }
+                                    let bt = state.clock / baseLen; let segTicks = isJustDots ? 0 : bt; let nextAdd = bt / 2;
+                                    if (isJustDots) { for (let d = 0; d < tkns[cIdx].len; d++) { segTicks += nextAdd; nextAdd /= 2; } }
+                                    while (cIdx + 1 < tkns.length && tkns[cIdx + 1].val.startsWith('.')) {
+                                        cIdx++; for (let d = 0; d < tkns[cIdx].len; d++) { segTicks += nextAdd; nextAdd /= 2; } evIdxs.push(cIdx);
+                                    }
+                                    return { t: segTicks, ni: cIdx };
+                                };
+                                evIdxs.push(i); let nInf = parseLenSegment(i); totalNoteTicks += nInf.t; i = nInf.ni;
+                                while (i + 1 < tkns.length && (tkns[i + 1].val === '&' || tkns[i + 1].val === '^')) {
+                                    i++; evIdxs.push(i);
+                                    if (i + 1 < tkns.length) {
+                                        if (tkns[i + 1].isNote || tkns[i + 1].val.toLowerCase() === 'r') { i++; evIdxs.push(i); let nx = parseLenSegment(i); totalNoteTicks += nx.t; i = nx.ni; }
+                                        else if (/^\d/.test(tkns[i + 1].val) || tkns[i + 1].val.startsWith('.')) { i++; evIdxs.push(i); let nx = parseLenSegment(i); totalNoteTicks += nx.t; i = nx.ni; }
+                                        else break;
+                                    } else break;
+                                }
+                                const time = startTime + (state.ticks * (240 / (currentTempo * 0.75 * state.clock)));
+                                const durF = totalNoteTicks * (240 / (currentTempo * 0.75 * state.clock));
+                                if (lowVal !== 'r') {
+                                    const f = 440 * Math.pow(2, (notesMap[lowVal] + (state.octave - 4) * 12 + state.kshift) / 12) + (state.detune * 0.1);
+                                    const qO = (state.q * (240 / (currentTempo * 0.75 * state.clock)));
+                                    if (chId !== 'G') playPSG(f, time, Math.max(0.001, durF - qO), state.v, chId);
+                                    else playDrum(time, state);
+                                }
+                                addCharTicks(uiStart, uiLen, totalNoteTicks);
+                                evIdxs.forEach(idx => {
+                                    let tok = tkns[idx]; let u_s = uiOverrideIdx !== -1 ? uiOverrideIdx : tok.idx; let u_l = uiOverrideIdx !== -1 ? uiOverrideLen : tok.len;
+                                    addRange(noteIndices, u_s, u_s + u_l - 1);
+                                    for (let k = 0; k < u_l; k++) charEvents[u_s + k].push({ time, end: time + durF });
+                                });
+                                state.ticks += totalNoteTicks;
+                            }
+                            else {
+                                let cmdChar = t.val; let isM = cmdChar === 'M'; let isV = cmdChar === 'v'; let isY = cmdChar === 'y'; let origI = i;
+                                if (isM && tkns[i + 1] && ['F', 'W', 'C', 'L', 'D'].includes(tkns[i + 1].val)) { i++; cmdChar = 'M' + tkns[i].val; }
+                                else if (isV && tkns[i + 1]?.val === 'm') { i++; cmdChar = 'vm'; }
+                                else if (isY && tkns[i + 1] && tkns[i + 2]) {
+                                    let combo = tkns[i + 1].val + tkns[i + 2].val;
+                                    if (['DM', 'TL', 'KA', 'DR', 'SR', 'SL', 'SE'].includes(combo)) { i += 2; cmdChar = 'y' + combo; }
+                                }
+
+                                let args = [];
+                                while (i + 1 < tkns.length) {
+                                    let nx = tkns[i + 1];
+                                    if (nx.isNote || /^[a-zA-Z@*\[\]/&^()<>:;]/.test(nx.val)) break;
+                                    if (/^[0-9,.\-\+\$]+/.test(nx.val) || nx.val.startsWith('"')) { i++; args.push(nx.val); } else break;
+                                }
+
+                                let isSupported = supportedCmds.has(t.val) && cmdChar !== 'vm' && !cmdChar.startsWith('y') && !cmdChar.startsWith('M');
+                                if (t.val === 'M' || t.val === 'w' || t.val === 'E') isSupported = false;
+                                let u_s = uiOverrideIdx !== -1 ? uiOverrideIdx : tkns[origI].idx;
+                                let realEndIdx = tkns[i].idx + tkns[i].len - 1;
+                                let u_e = uiOverrideIdx !== -1 ? uiOverrideIdx + uiOverrideLen - 1 : realEndIdx;
+                                setCol(u_s, u_e, isSupported ? C_WHITE : C_RED);
+                                for (let k = origI; k <= i; k++) reg(k, 0.01);
+
+                                if (isSupported) {
+                                    let argString = args.join('');
+                                    let multiArgs = argString.split(',').map(a => a.trim()).filter(a => a !== "").map(a => parseFloat(a));
+
+                                    if (cmdChar === 'C' && multiArgs.length) state.clock = multiArgs[0];
+                                    if (cmdChar === 'q' && multiArgs.length) state.q = multiArgs[0];
+                                    if (cmdChar === 'l' && multiArgs.length) state.l = multiArgs[0];
+                                    if (cmdChar === 'o' && multiArgs.length) state.octave = multiArgs[0];
+                                    if (cmdChar === 'v') {
+                                        if (chId === 'G' && multiArgs.length > 1) {
+                                            state.v = multiArgs[0];
+                                            if (multiArgs[1] !== undefined) state.v_bd = multiArgs[1];
+                                            if (multiArgs[2] !== undefined) state.v_sd = multiArgs[2];
+                                            if (multiArgs[3] !== undefined) state.v_cy = multiArgs[3];
+                                            if (multiArgs[4] !== undefined) state.v_hh = multiArgs[4];
+                                            if (multiArgs[5] !== undefined) state.v_tm = multiArgs[5];
+                                            if (multiArgs[6] !== undefined) state.v_ry = multiArgs[6];
+                                        } else if (multiArgs.length) {
+                                            state.v = multiArgs[0];
+                                        }
+                                    }
+                                    if (cmdChar.toLowerCase() === 't' && multiArgs.length) currentTempo = multiArgs[0];
+                                    if (cmdChar === '@' && multiArgs.length) state.inst = multiArgs[0];
+                                    if (cmdChar === 'D') {
+                                        let vStr = args.join(''); let val = parseInt(vStr) || 0;
+                                        if (vStr.startsWith('+') || vStr.startsWith('-')) state.detune += val; else state.detune = val;
+                                    }
+                                    if (cmdChar === 'K') state.kshift = parseInt(args.join('')) || 0;
+                                    if (cmdChar === 'k') state.kshift += parseInt(args.join('')) || 0;
+                                    if (cmdChar === '(' || cmdChar === ')') {
+                                        let dir = cmdChar === '(' ? -1 : 1; let step = multiArgs.length ? multiArgs[0] : 1;
+                                        state.v = Math.max(0, Math.min(127, state.v + dir * step));
+                                    }
+                                    if (cmdChar === '[') {
+                                        let max = multiArgs.length ? multiArgs[0] : 2;
+                                        let d = 0, ei = -1; for (let j = i + 1; j < tkns.length; j++) { if (tkns[j].val === '[') d++; else if (tkns[j].val === ']') { if (d === 0) { ei = j; break; } d--; } }
+                                        if (ei !== -1 && tkns[ei + 1] && /^\d+$/.test(tkns[ei + 1].val)) max = parseInt(tkns[ei + 1].val);
+                                        state.loopStack.push({ startIdx: i, endIdx: ei, count: 0, max });
+                                    }
+                                    if (cmdChar === '/') { let l = state.loopStack[state.loopStack.length - 1]; if (l && l.count === l.max - 1) i = l.endIdx - 1; }
+                                    if (cmdChar === ']') { let l = state.loopStack[state.loopStack.length - 1]; if (l) { l.count++; if (l.count < l.max) i = l.startIdx; else { state.loopStack.pop(); } } }
+                                }
+                            }
+                        }
+                    };
+                    process(tokenize(content, offset + contentStartIdx));
+                } else if (line.trim().startsWith('#') || line.trim().startsWith('@')) {
+                    setCol(offset, offset + line.length - 1, C_YELLOW);
+                }
+                offset += line.length + 1;
+            });
+
+            log("--- Compilation Finished. Validating Measure Lengths... ---", "#0f4");
+            let warningCount = 0;
+            allChunks.forEach(track => {
+                let clk = track.getClock(); let trackTotalTicks = 0;
+                track.chunks.forEach(c => { for (let k = c.start; k < c.end; k++) trackTotalTicks += charTicks[k]; });
+                if (trackTotalTicks > 0.001) {
+                    let rem = trackTotalTicks % clk;
+                    if (rem > 0.001 && (clk - rem) > 0.001) {
+                        log(`[警告] トラック ${track.chId} 全体の長さが小節単位（${clk}ティック）に合致していません。端数: ${rem.toFixed(2)} ティック`, "#ff0");
+                        warningCount++;
+                    }
+                }
+            });
+            if (warningCount === 0) log("✅ すべてのトラックの小節の辻褄が合致しました！", "#0f4");
+            else log(`⚠️ 計 ${warningCount} 件のトラックで長さの不一致が見つかりました。`, "#fa0");
+
+            log("Playback Started.", "#0f4");
+            animationId = requestAnimationFrame(draw);
+        }
+
+        function playPSG(f, t, d, v, ch) {
+            if (isNaN(f) || f <= 0) return;
+            const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+            o.type = 'square'; o.frequency.setValueAtTime(f, t);
+            g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(Math.max(0, v) * 0.01, t + 0.005); g.gain.linearRampToValueAtTime(0, t + d);
+            o.connect(g).connect(channelGains[ch]); o.start(t); o.stop(t + d);
+        }
+
+        function playDrum(t, state) {
+            const inst = state.inst;
+            const masterVol = (state.v / 63.0) * 0.25;
+
+            if (inst & 1) { // Bass Drum
+                const vol = (state.v_bd / 31.0) * masterVol * 3.0;
+                const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+                o.frequency.setValueAtTime(200, t); o.frequency.exponentialRampToValueAtTime(40, t + 0.05);
+                g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+                o.connect(g).connect(channelGains['G']); o.start(t); o.stop(t + 0.08);
+            }
+            if (inst & 2) { // Snare Drum
+                const vol = (state.v_sd / 31.0) * masterVol * 1.8;
+                const s = audioCtx.createBufferSource(); const g = audioCtx.createGain(); const f = audioCtx.createBiquadFilter();
+                s.buffer = noiseBuffer; f.type = 'highpass'; f.frequency.value = 1000;
+                g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+                s.connect(f).connect(g).connect(channelGains['G']); s.start(t); s.stop(t + 0.12);
+            }
+            if (inst & 4) { // Cymbal
+                const vol = (state.v_cy / 31.0) * masterVol * 1.4;
+                const s = audioCtx.createBufferSource(); const g = audioCtx.createGain(); const f = audioCtx.createBiquadFilter();
+                s.buffer = noiseBuffer; f.type = 'highpass'; f.frequency.value = 4000;
+                g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.6);
+                s.connect(f).connect(g).connect(channelGains['G']); s.start(t); s.stop(t + 0.6);
+            }
+            if (inst & 8) { // Hi-Hat
+                const vol = (state.v_hh / 31.0) * masterVol * 1.2;
+                const s = audioCtx.createBufferSource(); const g = audioCtx.createGain(); const f = audioCtx.createBiquadFilter();
+                s.buffer = noiseBuffer; f.type = 'highpass'; f.frequency.value = 6000;
+                g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+                s.connect(f).connect(g).connect(channelGains['G']); s.start(t); s.stop(t + 0.04);
+            }
+            if (inst & 16) { // Tom
+                const vol = (state.v_tm / 31.0) * masterVol * 2.0;
+                const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+                o.frequency.setValueAtTime(450, t); o.frequency.exponentialRampToValueAtTime(120, t + 0.1);
+                g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+                o.connect(g).connect(channelGains['G']); o.start(t); o.stop(t + 0.1);
+            }
+            if (inst & 32) { // Rimshot
+                const vol = (state.v_ry / 31.0) * masterVol * 2.2;
+                const s = audioCtx.createBufferSource(); const g = audioCtx.createGain(); const f = audioCtx.createBiquadFilter();
+                s.buffer = noiseBuffer; f.type = 'bandpass'; f.frequency.value = 3500; f.Q.value = 12;
+                g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.025);
+                s.connect(f).connect(g).connect(channelGains['G']); s.start(t); s.stop(t + 0.025);
+            }
+        }
+
+        function draw() {
+            if (!isPlaying || !audioCtx) return; const now = audioCtx.currentTime;
+            for (let i = 0; i < currentMMLString.length; i++) {
+                const evs = charEvents[i]; const el = document.getElementById(`char-${i}`); if (!el) continue;
+                let charState = 'idle';
+                if (evs && evs.length) {
+                    for (let e of evs) {
+                        if (now >= e.time && now <= e.end) { charState = 'active'; break; }
+                        else if (now > e.end) charState = 'played';
+                        else if (now < e.time && charState === 'played') { charState = 'idle'; break; }
+                    }
+                }
+                let targetClass = 'note-span'; let col = charColors[i];
+                if (col === C_RED) targetClass += ' hl-red'; else if (col === C_YELLOW) targetClass += ' hl-warning';
+                if (charState === 'active') targetClass += ' hl-active'; else if (charState === 'played' && noteIndices.has(i) && col !== C_RED && col !== C_YELLOW) targetClass += ' hl-played';
+                if (el.className !== targetClass) el.className = targetClass;
+            }
+            const ticks = (now - startTime) / (240 / (currentTempo * 0.75 * 128.0));
+            if (ticks > 0) document.getElementById('measureDisplay').textContent = `MEASURE: ${Math.floor(ticks / 128) + 1}`;
+            animationId = requestAnimationFrame(draw);
+        }
+
+        document.getElementById('playBtn').onclick = () => parseAndPlay();
+        document.getElementById('fileInput').onchange = (e) => {
+            const r = new FileReader(); r.onload = (ev) => { document.getElementById('mmlInput').value = ev.target.result; log("MML Loaded."); };
+            r.readAsText(e.target.files[0]);
+        };
+    </script>
+</body>
+
+</html>
