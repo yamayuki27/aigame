@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>2D Wind Tunnel Simulator - Ultra</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            color: #fff;
+            font-family: sans-serif;
+            touch-action: none;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+
+        #fps-counter {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            font-weight: bold;
+            font-size: 14px;
+            text-shadow: 1px 1px 2px #000;
+        }
+
+        .controls {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.85);
+            padding: 15px;
+            border-radius: 10px;
+            pointer-events: auto;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-items: center;
+            gap: 12px;
+            border: 1px solid #555;
+            width: 95%;
+            max-width: 700px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.7);
+        }
+
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 13px;
+        }
+
+        .control-group label {
+            width: 70px;
+            text-align: right;
+            color: #ccc;
+        }
+
+        input[type=range] {
+            width: 90px;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="simCanvas"></canvas>
+
+    <div id="ui-layer">
+        <div id="fps-counter">FPS: 0</div>
+        <div class="controls">
+            <div class="control-group">
+                <label for="angleSlider">角度:</label>
+                <input type="range" id="angleSlider" min="-180" max="180" value="15">
+            </div>
+            <div class="control-group">
+                <label for="windSlider">風速:</label>
+                <input type="range" id="windSlider" min="0" max="100" value="30">
+            </div>
+            <div class="control-group">
+                <label for="vorticitySlider">渦の強さ:</label>
+                <input type="range" id="vorticitySlider" min="0" max="100" value="40">
+            </div>
+            <div class="control-group">
+                <label for="viscositySlider">粘性:</label>
+                <input type="range" id="viscositySlider" min="0" max="100" value="5">
+            </div>
+            <div class="control-group">
+                <label for="widthSlider">煙の太さ:</label>
+                <input type="range" id="widthSlider" min="0.5" max="6" step="0.5" value="2">
+            </div>
+            <div class="control-group">
+                <label for="lifeSlider">煙の寿命:</label>
+                <input type="range" id="lifeSlider" min="20" max="300" value="180">
+            </div>
+            <div class="control-group">
+                <label for="repulsionSlider">反発力:</label>
+                <input type="range" id="repulsionSlider" min="0" max="30" value="8">
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+        const fpsCounter = document.getElementById('fps-counter');
+
+        const angleSlider = document.getElementById('angleSlider');
+        const windSlider = document.getElementById('windSlider');
+        const vorticitySlider = document.getElementById('vorticitySlider');
+        const viscositySlider = document.getElementById('viscositySlider');
+        const widthSlider = document.getElementById('widthSlider');
+        const lifeSlider = document.getElementById('lifeSlider');
+        const repulsionSlider = document.getElementById('repulsionSlider');
+
+        // 解像度を少し上げて、流線の交差を防ぐ (15 -> 12)
+        const RESOLUTION = 12;
+        // 圧力計算の精度を上げて圧縮を防ぐ
+        const ITERATIONS = 15;
+        const DT = 0.016;
+
+        let WIND_SPEED = 30;
+        let VORTICITY = 40; // 新規追加：渦度
+        let VISCOSITY = 0.00005;
+        let LINE_WIDTH = 2;
+        let SMOKE_LIFE = 180;
+        let REPULSION = 8;
+
+        let cols, rows;
+        let width, height;
+
+        let u, v, u_prev, v_prev;
+        let curl; // 渦度計算用の配列
+        let obstacle;
+
+        let airfoil = {
+            x: 0,
+            y: 0,
+            chord: 600,
+            angle: 15 * (Math.PI / 180), // 初期状態で見やすいように少し傾ける
+            isDragging: false
+        };
+
+        let particles = [];
+        const PARTICLE_COUNT = 1500;
+
+        const NOZZLE_COUNT = 8;
+        const NOZZLE_SPACING = 0.04;
+        const nozzleYs = [];
+        const startY = 0.5 - (NOZZLE_SPACING * (NOZZLE_COUNT - 1)) / 2;
+        for (let i = 0; i < NOZZLE_COUNT; i++) {
+            nozzleYs.push(startY + i * NOZZLE_SPACING);
+        }
+
+        function init() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+
+            cols = Math.floor(width / RESOLUTION) + 2;
+            rows = Math.floor(height / RESOLUTION) + 2;
+
+            const size = cols * rows;
+            u = new Float32Array(size);
+            v = new Float32Array(size);
+            u_prev = new Float32Array(size);
+            v_prev = new Float32Array(size);
+            curl = new Float32Array(size);
+            obstacle = new Uint8Array(size);
+
+            airfoil.x = width / 2;
+            airfoil.y = height / 2;
+
+            particles = [];
+            updateObstacleMask();
+        }
+
+        function IX(x, y) {
+            x = Math.max(0, Math.min(x, cols - 1));
+            y = Math.max(0, Math.min(y, rows - 1));
+            return x + y * cols;
+        }
+
+        function getNACA0012Y(x, chord) {
+            let xc = x / chord;
+            if (xc < 0 || xc > 1) return 0;
+            let t = 0.12;
+            return 5 * t * chord * (0.2969 * Math.sqrt(xc) - 0.1260 * xc - 0.3516 * xc * xc + 0.2843 * Math.pow(xc, 3) - 0.1015 * Math.pow(xc, 4));
+        }
+
+        // --- 流体計算エンジン ---
+        function setBnd(b, x) {
+            for (let i = 1; i < rows - 1; i++) {
+                x[IX(0, i)] = x[IX(1, i)];
+                x[IX(cols - 1, i)] = b === 1 ? -Math.abs(x[IX(cols - 2, i)]) : x[IX(cols - 2, i)];
+            }
+            for (let i = 1; i < cols - 1; i++) {
+                x[IX(i, 0)] = b === 2 ? -x[IX(i, 1)] : x[IX(i, 1)];
+                x[IX(i, rows - 1)] = b === 2 ? -x[IX(i, rows - 2)] : x[IX(i, rows - 2)];
+            }
+            x[IX(0, 0)] = 0.5 * (x[IX(1, 0)] + x[IX(0, 1)]);
+            x[IX(0, rows - 1)] = 0.5 * (x[IX(1, rows - 1)] + x[IX(0, rows - 2)]);
+            x[IX(cols - 1, 0)] = 0.5 * (x[IX(cols - 2, 0)] + x[IX(cols - 1, 1)]);
+            x[IX(cols - 1, rows - 1)] = 0.5 * (x[IX(cols - 2, rows - 1)] + x[IX(cols - 1, rows - 2)]);
+
+            for (let j = 0; j < rows; j++) {
+                for (let i = 0; i < cols; i++) {
+                    if (obstacle[IX(i, j)] === 1) x[IX(i, j)] = 0;
+                }
+            }
+        }
+
+        function linSolve(b, x, x0, a, c) {
+            for (let k = 0; k < ITERATIONS; k++) {
+                for (let j = 1; j < rows - 1; j++) {
+                    for (let i = 1; i < cols - 1; i++) {
+                        if (obstacle[IX(i, j)] === 0) {
+                            x[IX(i, j)] = (x0[IX(i, j)] + a * (x[IX(i - 1, j)] + x[IX(i + 1, j)] + x[IX(i, j - 1)] + x[IX(i, j + 1)])) / c;
+                        }
+                    }
+                }
+                setBnd(b, x);
+            }
+        }
+
+        function diffuse(b, x, x0, diff, dt) {
+            let a = dt * diff * (cols - 2) * (rows - 2);
+            linSolve(b, x, x0, a, 1 + 4 * a);
+        }
+
+        function advect(b, d, d0, u, v, dt) {
+            let i0, j0, i1, j1, x, y, s0, t0, s1, t1;
+            let dt0 = dt * Math.min(cols, rows);
+
+            for (let j = 1; j < rows - 1; j++) {
+                for (let i = 1; i < cols - 1; i++) {
+                    if (obstacle[IX(i, j)] === 1) continue;
+                    x = i - dt0 * u[IX(i, j)]; y = j - dt0 * v[IX(i, j)];
+                    if (x < 0.5) x = 0.5; if (x > cols - 1.5) x = cols - 1.5;
+                    i0 = Math.floor(x); i1 = i0 + 1;
+                    if (y < 0.5) y = 0.5; if (y > rows - 1.5) y = rows - 1.5;
+                    j0 = Math.floor(y); j1 = j0 + 1;
+                    s1 = x - i0; s0 = 1.0 - s1; t1 = y - j0; t0 = 1.0 - t1;
+                    d[IX(i, j)] = s0 * (t0 * d0[IX(i0, j0)] + t1 * d0[IX(i0, j1)]) + s1 * (t0 * d0[IX(i1, j0)] + t1 * d0[IX(i1, j1)]);
+                }
+            }
+            setBnd(b, d);
+        }
+
+        function project(u, v, p, div) {
+            for (let j = 1; j < rows - 1; j++) {
+                for (let i = 1; i < cols - 1; i++) {
+                    div[IX(i, j)] = -0.5 * (u[IX(i + 1, j)] - u[IX(i - 1, j)] + v[IX(i, j + 1)] - v[IX(i, j - 1)]) / Math.max(cols, rows);
+                    p[IX(i, j)] = 0;
+                }
+            }
+            setBnd(0, div); setBnd(0, p);
+            linSolve(0, p, div, 1, 4);
+            for (let j = 1; j < rows - 1; j++) {
+                for (let i = 1; i < cols - 1; i++) {
+                    if (obstacle[IX(i, j)] === 0) {
+                        u[IX(i, j)] -= 0.5 * (p[IX(i + 1, j)] - p[IX(i - 1, j)]) * Math.max(cols, rows);
+                        v[IX(i, j)] -= 0.5 * (p[IX(i, j + 1)] - p[IX(i, j - 1)]) * Math.max(cols, rows);
+                    }
+                }
+            }
+            setBnd(1, u); setBnd(2, v);
+        }
+
+        // 🔴 新機能：渦度閉じ込め（Vorticity Confinement）
+        // 失われた細かい渦を復活させて乱流を生み出す
+        function applyVorticity(u, v, dt) {
+            if (VORTICITY === 0) return;
+
+            // カール（回転）を計算
+            for (let j = 1; j < rows - 1; j++) {
+                for (let i = 1; i < cols - 1; i++) {
+                    let du_dy = (u[IX(i, j + 1)] - u[IX(i, j - 1)]) * 0.5;
+                    let dv_dx = (v[IX(i + 1, j)] - v[IX(i - 1, j)]) * 0.5;
+                    curl[IX(i, j)] = dv_dx - du_dy;
+                }
+            }
+            // 渦を強化する力を適用
+            for (let j = 2; j < rows - 2; j++) {
+                for (let i = 2; i < cols - 2; i++) {
+                    let c = curl[IX(i, j)];
+                    if (Math.abs(c) > 0.000001 && obstacle[IX(i, j)] === 0) {
+                        let dw_dx = (Math.abs(curl[IX(i + 1, j)]) - Math.abs(curl[IX(i - 1, j)])) * 0.5;
+                        let dw_dy = (Math.abs(curl[IX(i, j + 1)]) - Math.abs(curl[IX(i, j - 1)])) * 0.5;
+                        let len = Math.sqrt(dw_dx * dw_dx + dw_dy * dw_dy) + 0.000001;
+                        dw_dx /= len;
+                        dw_dy /= len;
+                        // 渦の強さを速度場に加算
+                        let force = VORTICITY * 0.05;
+                        u[IX(i, j)] += dw_dy * -c * force * dt;
+                        v[IX(i, j)] += dw_dx * c * force * dt;
+                    }
+                }
+            }
+        }
+
+        function fluidStep() {
+            const nozzleX = cols - 2;
+            for (let ny = 1; ny < rows - 1; ny++) {
+                u[IX(nozzleX, ny)] = -WIND_SPEED;
+            }
+
+            applyVorticity(u, v, DT); // 渦度を適用
+
+            u_prev.set(u); v_prev.set(v);
+            diffuse(1, u_prev, u, VISCOSITY, DT); diffuse(2, v_prev, v, VISCOSITY, DT);
+            project(u_prev, v_prev, u, v);
+            advect(1, u, u_prev, u_prev, v_prev, DT); advect(2, v, v_prev, u_prev, v_prev, DT);
+            project(u, v, u_prev, v_prev);
+        }
+
+        // --- インタラクションと描画 ---
+
+        function updateObstacleMask() {
+            obstacle.fill(0);
+            let cosA = Math.cos(airfoil.angle);
+            let sinA = Math.sin(airfoil.angle);
+            let halfChord = airfoil.chord / 2;
+
+            for (let j = 0; j < rows; j++) {
+                for (let i = 0; i < cols; i++) {
+                    let px = (i + 0.5) * RESOLUTION;
+                    let py = (j + 0.5) * RESOLUTION;
+
+                    let dx = px - airfoil.x;
+                    let dy = py - airfoil.y;
+
+                    let localX = dx * cosA + dy * sinA;
+                    let localY = -dx * sinA + dy * cosA;
+                    let nx = localX + halfChord;
+
+                    if (nx >= 0 && nx <= airfoil.chord) {
+                        let ny = Math.abs(localY);
+                        let thickness = getNACA0012Y(nx, airfoil.chord);
+                        if (ny <= thickness) {
+                            obstacle[IX(i, j)] = 1;
+                            u[IX(i, j)] = 0;
+                            v[IX(i, j)] = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        function getVelocityAt(px, py) {
+            let x = px / RESOLUTION; let y = py / RESOLUTION;
+            if (x < 0.5 || x > cols - 1.5 || y < 0.5 || y > rows - 1.5) return { u: 0, v: 0 };
+
+            let i0 = Math.floor(x), i1 = i0 + 1, j0 = Math.floor(y), j1 = j0 + 1;
+            let s1 = x - i0, s0 = 1.0 - s1, t1 = y - j0, t0 = 1.0 - t1;
+
+            let velU = s0 * (t0 * u[IX(i0, j0)] + t1 * u[IX(i0, j1)]) + s1 * (t0 * u[IX(i1, j0)] + t1 * u[IX(i1, j1)]);
+            let velV = s0 * (t0 * v[IX(i0, j0)] + t1 * v[IX(i0, j1)]) + s1 * (t0 * v[IX(i1, j0)] + t1 * v[IX(i1, j1)]);
+
+            return { u: velU, v: velV };
+        }
+
+        function drawParticles() {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+            ctx.fillRect(0, 0, width, height);
+
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+            ctx.lineWidth = LINE_WIDTH;
+            ctx.lineCap = 'round';
+            ctx.beginPath();
+
+            while (particles.length < PARTICLE_COUNT) {
+                let ny = nozzleYs[Math.floor(Math.random() * nozzleYs.length)] * height;
+                particles.push({
+                    x: width - Math.random() * 5,
+                    y: ny + (Math.random() - 0.5) * 0.5, // ばらつきをさらに極小化
+                    life: SMOKE_LIFE * (0.8 + Math.random() * 0.4)
+                });
+            }
+
+            let cosA = Math.cos(airfoil.angle);
+            let sinA = Math.sin(airfoil.angle);
+
+            for (let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i];
+
+                // 描画開始点
+                ctx.moveTo(p.x, p.y);
+
+                // 🔴 新機能：ルンゲ＝クッタ法(RK2)による未来予測移動
+                // これにより流線が交差せず、木目のように美しく並行して流れます
+                let vel1 = getVelocityAt(p.x, p.y);
+                let k1x = vel1.u * 3;
+                let k1y = vel1.v * 3;
+
+                // 予測地点の速度を取得
+                let vel2 = getVelocityAt(p.x + k1x * 0.5, p.y + k1y * 0.5);
+                let moveX = vel2.u * 3;
+                let moveY = vel2.v * 3;
+
+                let speedDist = Math.sqrt(moveX * moveX + moveY * moveY);
+                if (speedDist > 60) {
+                    let ratio = 60 / speedDist;
+                    moveX *= ratio;
+                    moveY *= ratio;
+                    speedDist = 60;
+                }
+
+                let startX = p.x;
+                let startY = p.y;
+                let steps = Math.max(1, Math.ceil(speedDist / 2));
+                let stepX = moveX / steps;
+                let stepY = moveY / steps;
+
+                // CCD (連続衝突判定)
+                for (let s = 1; s <= steps; s++) {
+                    p.x = startX + stepX * s;
+                    p.y = startY + stepY * s;
+
+                    let dx = p.x - airfoil.x;
+                    let dy = p.y - airfoil.y;
+
+                    let localX = dx * cosA + dy * sinA;
+                    let localY = -dx * sinA + dy * cosA;
+                    let nx = localX + airfoil.chord / 2;
+
+                    if (nx >= -5 && nx <= airfoil.chord + 5) {
+                        let thickness = getNACA0012Y(Math.max(0, Math.min(nx, airfoil.chord)), airfoil.chord);
+                        let effectiveThickness = thickness + REPULSION;
+
+                        if (Math.abs(localY) < effectiveThickness) {
+                            let sign = localY >= 0 ? 1 : -1;
+                            localY = effectiveThickness * sign;
+                            nx += 0.5; // 滑らせる
+
+                            let newDx = nx - airfoil.chord / 2;
+                            let newDy = localY;
+                            p.x = airfoil.x + newDx * cosA - newDy * sinA;
+                            p.y = airfoil.y + newDx * sinA + newDy * cosA;
+                            break;
+                        }
+                    }
+                }
+
+                ctx.lineTo(p.x, p.y);
+                p.life--;
+
+                if (p.x < 0 || p.x > width || p.y < 0 || p.y > height || p.life <= 0) {
+                    particles.splice(i, 1);
+                }
+            }
+            ctx.stroke();
+        }
+
+        function drawAirfoil() {
+            ctx.fillStyle = '#1a1a1a'; // リアルなカーボン風の暗さ
+            ctx.save();
+            ctx.translate(airfoil.x, airfoil.y);
+            ctx.rotate(airfoil.angle);
+
+            ctx.beginPath();
+            let halfChord = airfoil.chord / 2;
+            for (let x = 0; x <= airfoil.chord; x += 5) {
+                ctx.lineTo(x - halfChord, -getNACA0012Y(x, airfoil.chord));
+            }
+            for (let x = airfoil.chord; x >= 0; x -= 5) {
+                ctx.lineTo(x - halfChord, getNACA0012Y(x, airfoil.chord));
+            }
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+        }
+
+        function drawCollisionOutline() {
+            ctx.save();
+            ctx.translate(airfoil.x, airfoil.y);
+            ctx.rotate(airfoil.angle);
+
+            ctx.strokeStyle = '#00ff00';
+            ctx.lineWidth = 1;
+
+            ctx.beginPath();
+            let halfChord = airfoil.chord / 2;
+            for (let x = 0; x <= airfoil.chord; x += 5) {
+                ctx.lineTo(x - halfChord, -getNACA0012Y(x, airfoil.chord));
+            }
+            for (let x = airfoil.chord; x >= 0; x -= 5) {
+                ctx.lineTo(x - halfChord, getNACA0012Y(x, airfoil.chord));
+            }
+            ctx.closePath();
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        let frames = 0;
+        let lastFpsTime = 0;
+
+        function animate(time) {
+            frames++;
+            if (time - lastFpsTime > 1000) {
+                fpsCounter.innerText = `FPS: ${frames}`;
+                frames = 0;
+                lastFpsTime = time;
+            }
+
+            fluidStep();
+            drawParticles();
+
+            drawAirfoil();
+            drawCollisionOutline();
+
+            requestAnimationFrame(animate);
+        }
+
+        window.addEventListener('resize', init);
+
+        angleSlider.addEventListener('input', (e) => {
+            airfoil.angle = e.target.value * (Math.PI / 180);
+            updateObstacleMask();
+        });
+        windSlider.addEventListener('input', (e) => {
+            WIND_SPEED = parseFloat(e.target.value);
+        });
+        vorticitySlider.addEventListener('input', (e) => {
+            VORTICITY = parseFloat(e.target.value);
+        });
+        viscositySlider.addEventListener('input', (e) => {
+            VISCOSITY = parseFloat(e.target.value) / 100000;
+        });
+        widthSlider.addEventListener('input', (e) => {
+            LINE_WIDTH = parseFloat(e.target.value);
+        });
+        lifeSlider.addEventListener('input', (e) => {
+            SMOKE_LIFE = parseFloat(e.target.value);
+        });
+        repulsionSlider.addEventListener('input', (e) => {
+            REPULSION = parseFloat(e.target.value);
+        });
+
+        function getPointerPos(e) {
+            if (e.touches) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+            return { x: e.clientX, y: e.clientY };
+        }
+
+        canvas.addEventListener('pointerdown', (e) => {
+            let pos = getPointerPos(e);
+            let dx = pos.x - airfoil.x;
+            let dy = pos.y - airfoil.y;
+            if (Math.sqrt(dx * dx + dy * dy) < airfoil.chord / 2) {
+                airfoil.isDragging = true;
+            }
+        });
+
+        window.addEventListener('pointermove', (e) => {
+            if (airfoil.isDragging) {
+                let pos = getPointerPos(e);
+                airfoil.x = pos.x;
+                airfoil.y = pos.y;
+                updateObstacleMask();
+            }
+        });
+
+        window.addEventListener('pointerup', () => airfoil.isDragging = false);
+
+        init();
+        requestAnimationFrame(animate);
+    </script>
+</body>
+
+</html>
