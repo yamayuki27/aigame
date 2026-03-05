@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>2D Wind Tunnel Simulator - Ultra Fixed</title>
+    <title>2D Wind Tunnel Simulator - Responsive</title>
     <style>
         body {
             margin: 0;
@@ -55,6 +55,9 @@
             width: 95%;
             max-width: 700px;
             box-shadow: 0 4px 15px rgba(0, 0, 0, 0.7);
+            /* スマホ横向きなどで溢れないように最大高さを指定してスクロール可能に */
+            max-height: 35vh;
+            overflow-y: auto;
         }
 
         .control-group {
@@ -72,6 +75,24 @@
 
         input[type=range] {
             width: 90px;
+        }
+
+        /* モバイル向けの微調整 */
+        @media (max-width: 600px) {
+            .controls {
+                gap: 8px;
+                padding: 10px;
+                bottom: 10px;
+            }
+
+            .control-group label {
+                width: 60px;
+                font-size: 11px;
+            }
+
+            input[type=range] {
+                width: 70px;
+            }
         }
     </style>
 </head>
@@ -126,6 +147,7 @@
         const lifeSlider = document.getElementById('lifeSlider');
         const repulsionSlider = document.getElementById('repulsionSlider');
 
+        // 解像度やイテレーション数はスマホの負荷に応じて後から調整可能です
         const RESOLUTION = 12;
         const ITERATIONS = 15;
         const DT = 0.016;
@@ -137,17 +159,14 @@
         let SMOKE_LIFE = 180;
         let REPULSION = 8;
 
-        // Smoke / entrainment parameters
         const DIFFUSION = 0.0002;
-        const BUOYANCY = 0.35; // upward force per density
-        const ENTRAINMENT = 1.0; // pulls air into high-density regions
-        const ENTRAIN_PULL = 0.9; // particle-level pull toward density gradients
+        const BUOYANCY = 0.35;
+        const ENTRAINMENT = 1.0;
+        const ENTRAIN_PULL = 0.9;
 
         let density, density_prev;
-
         let cols, rows;
         let width, height;
-
         let u, v, u_prev, v_prev;
         let curl;
         let obstacle;
@@ -155,7 +174,7 @@
         let airfoil = {
             x: 0,
             y: 0,
-            chord: 600,
+            chord: 600, // init関数で動的に上書きされます
             angle: 15 * (Math.PI / 180),
             isDragging: false
         };
@@ -188,6 +207,8 @@
             density = new Float32Array(size);
             density_prev = new Float32Array(size);
 
+            // 画面サイズに応じて翼のサイズを自動調整 (画面の短辺の60%、最大600px)
+            airfoil.chord = Math.min(Math.min(width, height) * 0.6, 600);
             airfoil.x = width / 2;
             airfoil.y = height / 2;
 
@@ -305,7 +326,6 @@
                         let len = Math.sqrt(dw_dx * dw_dx + dw_dy * dw_dy) + 0.000001;
                         dw_dx /= len;
                         dw_dy /= len;
-                        // 増幅: 密度勾配が大きいところでは渦の強制を強める（煙の周りで渦が発生しやすくする）
                         let gradDensityX = (density[IX(i + 1, j)] - density[IX(i - 1, j)]) * 0.5;
                         let gradDensityY = (density[IX(i, j + 1)] - density[IX(i, j - 1)]) * 0.5;
                         let gradDensity = Math.sqrt(gradDensityX * gradDensityX + gradDensityY * gradDensityY);
@@ -334,11 +354,9 @@
             return { x: gx, y: gy };
         }
 
-        // ★修正: 流体ステップ
         function fluidStep() {
             let simSpeed = WIND_SPEED * 0.05;
 
-            // 全体の風の流れ（外力）を適用
             for (let j = 1; j < rows - 1; j++) {
                 for (let i = 1; i < cols - 1; i++) {
                     if (obstacle[IX(i, j)] === 0) {
@@ -347,22 +365,18 @@
                 }
             }
 
-            // ★修正: 右端3列分を強制的にノズルとして風を送り込む
             for (let i = cols - 4; i < cols - 1; i++) {
                 for (let j = 1; j < rows - 1; j++) {
                     u[IX(i, j)] = -simSpeed;
                 }
             }
 
-            // --- Smoke density advection / diffusion ---
             density_prev.set(density);
             diffuse(0, density, density_prev, DIFFUSION, DT);
 
-            // prepare u_prev/v_prev for advecting density
             u_prev.set(u); v_prev.set(v);
             advect(0, density, density_prev, u_prev, v_prev, DT);
 
-            // Apply buoyancy and entrainment forces from density
             for (let j = 2; j < rows - 2; j++) {
                 for (let i = 2; i < cols - 2; i++) {
                     let idx = IX(i, j);
@@ -370,17 +384,14 @@
                     let d = density[idx];
                     let gradX = (density[IX(i + 1, j)] - density[IX(i - 1, j)]) * 0.5;
                     let gradY = (density[IX(i, j + 1)] - density[IX(i, j - 1)]) * 0.5;
-                    // 吸い込み: 密度の高い方へ周囲の空気を引き込む
                     u[idx] += -ENTRAINMENT * gradX * DT;
                     v[idx] += -ENTRAINMENT * gradY * DT;
-                    // ブイアンシー: 煙が上に立ち上がるように少し上向きの力を追加
                     v[idx] -= BUOYANCY * d * DT;
                 }
             }
 
             applyVorticity(u, v, DT);
 
-            // Velocity solve
             u_prev.set(u); v_prev.set(v);
             diffuse(1, u_prev, u, VISCOSITY, DT); diffuse(2, v_prev, v, VISCOSITY, DT);
             project(u_prev, v_prev, u, v);
@@ -434,7 +445,6 @@
             return { u: velU, v: velV };
         }
 
-        // ★修正: パーティクル描画と生成ロジック
         function drawParticles() {
             ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
             ctx.fillRect(0, 0, width, height);
@@ -447,7 +457,6 @@
             while (particles.length < PARTICLE_COUNT) {
                 let ny = nozzleYs[Math.floor(Math.random() * nozzleYs.length)] * height;
                 particles.push({
-                    // ★修正: 壁から40px離して生成することで停滞を回避
                     x: width - 40 - Math.random() * 10,
                     y: ny + (Math.random() - 0.5) * 5,
                     life: SMOKE_LIFE * (0.8 + Math.random() * 0.4)
@@ -472,7 +481,6 @@
                 let moveX = vel2.u * speedScale;
                 let moveY = vel2.v * speedScale;
 
-                // 移動制限
                 let speedDist = Math.sqrt(moveX * moveX + moveY * moveY);
                 if (speedDist > 60) {
                     let ratio = 60 / speedDist;
@@ -481,7 +489,6 @@
                     speedDist = 60;
                 }
 
-                // 密度勾配に従って周囲を引き込む（エントレインメント表現）
                 let g = getDensityGradientAt(p.x, p.y);
                 moveX += -g.x * ENTRAIN_PULL * speedScale * 0.5;
                 moveY += -g.y * ENTRAIN_PULL * speedScale * 0.5;
@@ -489,10 +496,8 @@
                 p.x += moveX;
                 p.y += moveY;
 
-                // 移動後に少量の密度を残す（煙の持続）
                 addDensityAt(p.x, p.y, 0.02);
 
-                // 衝突判定
                 let dx = p.x - airfoil.x;
                 let dy = p.y - airfoil.y;
                 let localX = dx * cosA + dy * sinA;
@@ -612,8 +617,8 @@
             REPULSION = parseFloat(e.target.value);
         });
 
+        // pointer系イベントはPCでもスマホでも clientX/Y で取得できます
         function getPointerPos(e) {
-            if (e.touches) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
             return { x: e.clientX, y: e.clientY };
         }
 
@@ -621,6 +626,7 @@
             let pos = getPointerPos(e);
             let dx = pos.x - airfoil.x;
             let dy = pos.y - airfoil.y;
+            // 当たり判定の範囲をchord(翼弦長)の半分に設定
             if (Math.sqrt(dx * dx + dy * dy) < airfoil.chord / 2) {
                 airfoil.isDragging = true;
             }
@@ -636,6 +642,7 @@
         });
 
         window.addEventListener('pointerup', () => airfoil.isDragging = false);
+        window.addEventListener('pointercancel', () => airfoil.isDragging = false);
 
         init();
         requestAnimationFrame(animate);
