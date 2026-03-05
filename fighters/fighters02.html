@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>3D Planet Fighter - Authoritative Edition</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #000;
+            touch-action: none;
+            font-family: 'Courier New', Courier, monospace;
+            user-select: none;
+        }
+
+        .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #00ff00;
+            text-align: center;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 10;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            right: 20px;
+            color: #00ff00;
+            pointer-events: none;
+            z-index: 5;
+            display: flex;
+            justify-content: space-between;
+            font-size: 18px;
+            text-shadow: 2px 2px 2px #000;
+        }
+
+        #entry-alert {
+            position: absolute;
+            top: 30%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ff0000;
+            font-size: clamp(24px, 6vw, 40px);
+            font-weight: bold;
+            display: none;
+            z-index: 20;
+            animation: blink 0.5s infinite;
+            text-shadow: 0 0 10px #f00;
+        }
+
+        @keyframes blink {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0;
+            }
+        }
+
+        button {
+            padding: 15px 30px;
+            background: transparent;
+            color: #00ff00;
+            border: 2px solid #00ff00;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: bold;
+            margin-top: 20px;
+            font-size: 20px;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        <div id="ui-left">CONNECTING...</div>
+        <div id="ui-right"></div>
+    </div>
+    <div id="entry-alert">NEW CHALLENGER ENTERS!</div>
+
+    <div id="screen-title" class="overlay">
+        <h1>PLANET FIGHTER</h1>
+        <p>UP/SPACE: FIRE | DOWN: ENGINE ON/OFF</p>
+        <p>DRAG: TURN & AUTO-FIRE</p>
+        <button onclick="changeState('GAME')">ENGAGE MISSION</button>
+    </div>
+
+    <script
+        type="importmap">{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }</script>
+    <script src="/socket.io/socket.io.js"></script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        const socket = io();
+
+        // --- 設定値 ---
+        const PLANET_RADIUS = 100, ALTITUDE = 2, FORWARD_SPEED = 0.001875, MAX_TURN_SPEED = 0.024;
+        const BULLET_SPEED = 0.012, TIME_LIMIT = 180;
+
+        let playerHP = 100, timeLeft = TIME_LIMIT, isEngineOn = true;
+        let otherPlayers = {}, bases = [], turrets = [], items = [], particles = [];
+        let playerBullets = [], enemyBullets = [];
+        const keys = {};
+        let isPointerDown = false, startPointerX = 0, currentRelativeX = 0;
+
+        const GameState = { TITLE: 'TITLE', GAME: 'GAME' };
+        let currentState = GameState.TITLE;
+
+        // --- Three.js セットアップ ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // 惑星（不透明仕様の復活）
+        const planetGroup = new THREE.Group();
+        const sphereGeo = new THREE.SphereGeometry(PLANET_RADIUS, 32, 32);
+        // 裏側が見えないように黒い不透明な球体を追加
+        const innerPlanet = new THREE.Mesh(sphereGeo, new THREE.MeshBasicMaterial({ color: 0x000500 }));
+        planetGroup.add(innerPlanet);
+        // 緑のワイヤーフレーム
+        const wirePlanet = new THREE.Mesh(sphereGeo, new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true }));
+        planetGroup.add(wirePlanet);
+        scene.add(planetGroup);
+
+        const shipGroup = new THREE.Group();
+        const shipMesh = new THREE.Mesh(new THREE.ConeGeometry(1.5, 4, 4).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xffff00, wireframe: true }));
+        shipGroup.add(shipMesh); shipGroup.add(camera);
+        camera.position.set(0, 30, 0); camera.lookAt(0, 0, 10);
+        scene.add(shipGroup);
+
+        // 弾丸プール
+        const bulletGeo = new THREE.CylinderGeometry(0.3, 0.3, 2, 4).rotateX(Math.PI / 2);
+        const createBullets = (count, color) => Array.from({ length: count }, () => {
+            const b = new THREE.Mesh(bulletGeo, new THREE.MeshBasicMaterial({ color, wireframe: true }));
+            b.visible = false; b.userData = { active: false, dist: 0 };
+            scene.add(b); return b;
+        });
+        playerBullets = createBullets(15, 0xffaa00);
+        enemyBullets = createBullets(30, 0x8800ff);
+
+        // --- 演出関数 ---
+        function spawnParticles(pos, color, count) {
+            for (let i = 0; i < count; i++) {
+                const p = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.5), new THREE.MeshBasicMaterial({ color, wireframe: true }));
+                p.position.copy(pos);
+                particles.push({ mesh: p, vel: new THREE.Vector3((Math.random() - 0.5) * 0.5, (Math.random() - 0.5) * 0.5, (Math.random() - 0.5) * 0.5), life: 30 });
+                scene.add(p);
+            }
+        }
+
+        // --- 同期受信 ---
+        socket.on('init_world', data => {
+            setupWorld(data.world);
+            Object.keys(data.players).forEach(id => { if (id !== socket.id) addOtherPlayer(id); });
+        });
+
+        socket.on('world_update', world => {
+            world.bases.forEach((b, i) => { if (!b.active && !bases[i].userData.dying) { bases[i].userData.dying = true; spawnParticles(bases[i].position, 0xff0000, 15); } });
+            world.turrets.forEach((t, i) => { if (!t.active && !turrets[i].userData.dying) { turrets[i].userData.dying = true; spawnParticles(turrets[i].position, 0x8800ff, 15); } });
+            world.items.forEach((item, i) => { if (!item.active && items[i].visible) { items[i].visible = false; spawnParticles(items[i].position, 0x00ffff, 10); } });
+        });
+
+        socket.on('player_moved', d => { if (otherPlayers[d.id]) otherPlayers[d.id].quaternion.fromArray(d.quat); });
+        socket.on('player_join_alert', () => {
+            document.getElementById('entry-alert').style.display = 'block';
+            setTimeout(() => document.getElementById('entry-alert').style.display = 'none', 3000);
+        });
+        socket.on('player_leave', id => { if (otherPlayers[id]) { scene.remove(otherPlayers[id]); delete otherPlayers[id]; } });
+
+        function setupWorld(world) {
+            const createObj = (data, geo, color) => {
+                const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color, wireframe: true }));
+                const pos = new THREE.Vector3().setFromSphericalCoords(PLANET_RADIUS, data.pos.phi, data.pos.theta);
+                mesh.position.copy(pos);
+                mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), pos.clone().normalize());
+                mesh.userData = { id: data.id, active: true, dying: false, origin: pos.clone(), normal: pos.clone().normalize(), sink: 0, fireTimer: 0 };
+                scene.add(mesh); return mesh;
+            };
+            world.bases.forEach(b => bases.push(createObj(b, new THREE.CylinderGeometry(4, 4, 6, 6), b.isPlayer ? 0x00ffff : 0xff4444)));
+            world.turrets.forEach(t => turrets.push(createObj(t, new THREE.BoxGeometry(5, 5, 5), 0x8800ff)));
+            world.items.forEach(i => items.push(createObj(i, new THREE.IcosahedronGeometry(1.5), 0x00ffff)));
+        }
+
+        function addOtherPlayer(id) {
+            const m = new THREE.Mesh(new THREE.ConeGeometry(1.5, 4, 4).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true }));
+            scene.add(m); otherPlayers[id] = m;
+        }
+
+        // --- ループ ---
+        window.changeState = (s) => { currentState = s; document.getElementById('screen-title').classList.add('hidden'); };
+        window.addEventListener('keydown', e => {
+            keys[e.code] = true;
+            if (e.code === 'ArrowDown') isEngineOn = !isEngineOn;
+        });
+        window.addEventListener('keyup', e => keys[e.code] = false);
+        window.addEventListener('mousedown', e => { isPointerDown = true; startPointerX = e.clientX; });
+        window.addEventListener('mousemove', e => { if (isPointerDown) currentRelativeX = e.clientX - startPointerX; });
+        window.addEventListener('mouseup', () => { isPointerDown = false; currentRelativeX = 0; });
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (currentState === GameState.GAME) {
+                timeLeft -= 1 / 60;
+
+                // 旋回・前進
+                let turn = 0;
+                if (keys['ArrowLeft']) turn += MAX_TURN_SPEED;
+                if (keys['ArrowRight']) turn -= MAX_TURN_SPEED;
+                if (isPointerDown) turn = THREE.MathUtils.clamp(-currentRelativeX * 0.0005, -MAX_TURN_SPEED, MAX_TURN_SPEED);
+
+                shipGroup.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), turn));
+                if (isEngineOn) shipGroup.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), FORWARD_SPEED));
+                shipGroup.position.set(0, PLANET_RADIUS + ALTITUDE, 0).applyQuaternion(shipGroup.quaternion);
+                socket.emit('update_move', { quat: shipGroup.quaternion.toArray() });
+
+                // 射撃（上キー/スペース/ドラッグ）
+                if (keys['ArrowUp'] || keys['Space'] || isPointerDown) {
+                    const b = playerBullets.find(b => !b.userData.active);
+                    if (b) { b.visible = true; b.userData.active = true; b.userData.dist = 0; b.quaternion.copy(shipGroup.quaternion); }
+                }
+
+                // 砲台射撃
+                turrets.forEach(t => {
+                    if (!t.userData.active || t.userData.dying) return;
+                    if (++t.userData.fireTimer > 80) {
+                        const eb = enemyBullets.find(b => !b.userData.active);
+                        if (eb) { eb.visible = true; eb.userData.active = true; eb.userData.dist = 0; eb.quaternion.copy(t.quaternion); }
+                        t.userData.fireTimer = 0;
+                    }
+                });
+
+                // 弾丸更新・判定
+                [...playerBullets, ...enemyBullets].forEach(b => {
+                    if (!b.userData.active) return;
+                    b.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), BULLET_SPEED));
+                    b.position.set(0, PLANET_RADIUS + ALTITUDE, 0).applyQuaternion(b.quaternion);
+
+                    if (playerBullets.includes(b)) {
+                        [...bases, ...turrets].forEach(obj => {
+                            if (obj.userData.active && !obj.userData.dying && b.position.distanceTo(obj.position) < 6) {
+                                socket.emit('object_hit', { type: bases.includes(obj) ? 'bases' : 'turrets', id: obj.userData.id });
+                                b.userData.active = false; b.visible = false;
+                            }
+                        });
+                    } else if (b.position.distanceTo(shipGroup.position) < 3.5) {
+                        playerHP -= 5; b.userData.active = false; b.visible = false;
+                        spawnParticles(shipGroup.position, 0xff0000, 5);
+                    }
+                    if ((b.userData.dist += BULLET_SPEED) > Math.PI) { b.userData.active = false; b.visible = false; }
+                });
+
+                // アイテム取得
+                items.forEach(item => {
+                    if (item.visible && shipGroup.position.distanceTo(item.position) < 5) {
+                        socket.emit('object_hit', { type: 'items', id: item.userData.id });
+                    }
+                });
+
+                // 演出更新
+                for (let i = particles.length - 1; i >= 0; i--) {
+                    particles[i].mesh.position.add(particles[i].vel);
+                    if (--particles[i].life <= 0) { scene.remove(particles[i].mesh); particles.splice(i, 1); }
+                }
+                [...bases, ...turrets].forEach(obj => {
+                    if (obj.userData.dying) {
+                        obj.userData.sink += 0.1;
+                        obj.position.copy(obj.userData.origin).sub(obj.userData.normal.clone().multiplyScalar(obj.userData.sink));
+                        if (obj.userData.sink > 10) { obj.userData.active = false; obj.visible = false; }
+                    }
+                });
+
+                const targets = [...bases.filter(b => !b.userData.isPlayer), ...turrets].filter(t => t.userData.active).length;
+                document.getElementById('ui-left').innerText = `TARGETS: ${targets} | ENGINE: ${isEngineOn ? 'ON' : 'OFF'}`;
+                document.getElementById('ui-right').innerText = `HP: ${playerHP}% | PLAYERS: ${Object.keys(otherPlayers).length + 1}`;
+            }
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+
+</html>

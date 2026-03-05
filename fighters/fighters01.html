@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>3D Planet Fighter - Online Hybrid</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #000;
+            touch-action: none;
+            font-family: 'Courier New', Courier, monospace;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+
+        .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #00ff00;
+            text-align: center;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 10;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        h1 {
+            font-size: clamp(24px, 8vw, 48px);
+            text-shadow: 2px 2px 0px #004400;
+            margin-bottom: 20px;
+        }
+
+        p {
+            font-size: clamp(14px, 4vw, 18px);
+            margin: 5px;
+            line-height: 1.4;
+        }
+
+        button {
+            padding: clamp(10px, 3vw, 15px) clamp(20px, 6vw, 40px);
+            font-size: clamp(16px, 4vw, 22px);
+            background: transparent;
+            color: #00ff00;
+            border: 2px solid #00ff00;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: bold;
+            margin-top: 30px;
+            transition: all 0.2s;
+        }
+
+        button:active {
+            background: #00ff00;
+            color: #000;
+        }
+
+        #ui {
+            position: absolute;
+            top: env(safe-area-inset-top, 20px);
+            left: 20px;
+            right: 20px;
+            color: #00ff00;
+            font-size: clamp(12px, 3vw, 18px);
+            pointer-events: none;
+            text-shadow: 2px 2px 4px #000;
+            z-index: 5;
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+        }
+
+        #connection-status {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: #00ff00;
+            font-size: 12px;
+            z-index: 5;
+        }
+
+        /* 乱入警告テキスト */
+        #entry-alert {
+            position: absolute;
+            top: 30%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ff0000;
+            font-size: clamp(24px, 6vw, 40px);
+            font-weight: bold;
+            text-shadow: 0 0 10px #ff0000;
+            pointer-events: none;
+            z-index: 20;
+            display: none;
+            white-space: nowrap;
+            animation: blink 0.5s infinite;
+        }
+
+        @keyframes blink {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0;
+            }
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        <div id="ui-left"></div>
+        <div id="ui-right"></div>
+    </div>
+    <div id="connection-status">SERVER: DISCONNECTED</div>
+    <div id="entry-alert">NEW CHALLENGER ENTERS!</div>
+
+    <div id="screen-title" class="overlay">
+        <h1>PLANET FIGHTER</h1>
+        <p>UP: FIRE / DOWN: TOGGLE ENGINE</p>
+        <p>DRAG: TURN & AUTO-FIRE</p>
+        <button onclick="changeState('PREP')">START MISSION</button>
+    </div>
+
+    <div id="screen-prep" class="overlay hidden">
+        <h1>PREPARING...</h1>
+        <p id="prep-info">SCANNING SECTOR 7G</p>
+        <button id="btn-go" class="hidden" onclick="changeState('GAME')">ENGAGE</button>
+    </div>
+
+    <div id="screen-gameover" class="overlay hidden">
+        <h1 id="gameover-title">MISSION FAILED</h1>
+        <button onclick="location.reload()">RETRY</button>
+    </div>
+
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+    <script src="/socket.io/socket.io.js"></script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- 通信設定 ---
+        const socket = io();
+        let otherPlayers = {};
+        let isServerOnline = false;
+
+        // --- ゲーム設定 ---
+        const GameState = { TITLE: 'TITLE', PREP: 'PREP', GAME: 'GAME', GAMEOVER: 'GAMEOVER' };
+        let currentState = GameState.TITLE;
+
+        const PLANET_RADIUS = 100;
+        const SHIP_SIZE = 3.75;
+        const ALTITUDE = 2;
+        const BASE_RADIUS = 3;
+        const BASE_HEIGHT = 5;
+        const TIME_LIMIT = 180;
+
+        const FORWARD_SPEED = 0.001875;
+        const MAX_TURN_SPEED = 0.024;
+        const BULLET_SPEED = 0.012;
+
+        let playerHP = 100;
+        let timeLeft = TIME_LIMIT;
+        let isEngineOn = true; // 下キーで切り替え
+        let currentTurnVelocity = 0, turnSpringVelocity = 0;
+        let bases = [], turrets = [], particles = [];
+        const keys = {};
+        let fireTimer = 0, isPointerDown = false, startPointerX = 0, currentRelativeX = 0;
+
+        // --- 初期化 ---
+        const clock = new THREE.Clock();
+        const scene = new THREE.Scene();
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const planetGroup = new THREE.Group();
+        const sphereGeo = new THREE.SphereGeometry(PLANET_RADIUS, 24, 16);
+        planetGroup.add(new THREE.Mesh(sphereGeo, new THREE.MeshBasicMaterial({ color: 0x000500 })));
+        planetGroup.add(new THREE.Mesh(sphereGeo, new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true })));
+        scene.add(planetGroup);
+
+        const shipGroup = new THREE.Group();
+        const shipMesh = new THREE.Mesh(
+            new THREE.ConeGeometry(1.5, SHIP_SIZE, 4).rotateX(Math.PI / 2),
+            new THREE.MeshBasicMaterial({ color: 0xffff00, wireframe: true })
+        );
+        shipGroup.add(shipMesh);
+        scene.add(shipGroup);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 30, 0); camera.up.set(0, 0, 1); camera.lookAt(0, 0, 10);
+        shipGroup.add(camera);
+
+        // 弾丸プール
+        const bulletGeo = new THREE.CylinderGeometry(0.3, 0.3, 2, 4).rotateX(Math.PI / 2);
+        const playerBulletPool = [];
+        for (let i = 0; i < 12; i++) {
+            const b = new THREE.Mesh(bulletGeo, new THREE.MeshBasicMaterial({ color: 0xffaa00, wireframe: true }));
+            b.visible = false; b.userData = { active: false, distance: 0 };
+            scene.add(b); playerBulletPool.push(b);
+        }
+        const enemyBulletPool = [];
+        for (let i = 0; i < 40; i++) {
+            const b = new THREE.Mesh(bulletGeo, new THREE.MeshBasicMaterial({ color: 0x8800ff, wireframe: true }));
+            b.visible = false; b.userData = { active: false, distance: 0 };
+            scene.add(b); enemyBulletPool.push(b);
+        }
+
+        // --- 通信イベント ---
+        socket.on('connect', () => { isServerOnline = true; updateConnUI(); });
+        socket.on('disconnect', () => { isServerOnline = false; updateConnUI(); });
+        socket.on('player_list', (players) => {
+            for (let id in players) { if (id !== socket.id) addOtherPlayer(id); }
+            updateConnUI();
+        });
+        socket.on('player_moved', (data) => {
+            if (otherPlayers[data.id]) {
+                otherPlayers[data.id].quaternion.fromArray(data.quat);
+                otherPlayers[data.id].position.set(0, PLANET_RADIUS + ALTITUDE, 0).applyQuaternion(otherPlayers[data.id].quaternion);
+            }
+        });
+        // 乱入通知
+        socket.on('player_join_alert', (id) => {
+            if (id !== socket.id) {
+                addOtherPlayer(id);
+                showEntryAlert();
+            }
+        });
+        socket.on('player_leave', (id) => {
+            if (otherPlayers[id]) { scene.remove(otherPlayers[id]); delete otherPlayers[id]; }
+            updateConnUI();
+        });
+
+        function addOtherPlayer(id) {
+            if (otherPlayers[id]) return;
+            const mesh = new THREE.Mesh(
+                new THREE.ConeGeometry(1.5, SHIP_SIZE, 4).rotateX(Math.PI / 2),
+                new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true })
+            );
+            scene.add(mesh); otherPlayers[id] = mesh;
+        }
+
+        function updateConnUI() {
+            const count = Object.keys(otherPlayers).length + 1;
+            const status = isServerOnline ? "ONLINE" : "OFFLINE (LOCAL ONLY)";
+            document.getElementById('connection-status').innerText = `SERVER: ${status} | PLAYERS: ${count}/4`;
+        }
+
+        function showEntryAlert() {
+            const alertEl = document.getElementById('entry-alert');
+            alertEl.style.display = 'block';
+            setTimeout(() => { alertEl.style.display = 'none'; }, 3000);
+        }
+
+        // --- システム関数 ---
+        window.changeState = function (newState) {
+            currentState = newState;
+            document.querySelectorAll('.overlay').forEach(el => el.classList.add('hidden'));
+            if (newState === GameState.TITLE) {
+                document.getElementById('screen-title').classList.remove('hidden');
+                resetGameData();
+            } else if (newState === GameState.PREP) {
+                document.getElementById('screen-prep').classList.remove('hidden');
+                setTimeout(() => document.getElementById('btn-go').classList.remove('hidden'), 1000);
+            } else if (newState === GameState.GAME) {
+                document.getElementById('ui').style.display = 'flex';
+                clock.start();
+            }
+        };
+
+        function resetGameData() {
+            playerHP = 100; timeLeft = TIME_LIMIT; isEngineOn = true;
+            [...bases, ...turrets].forEach(obj => scene.remove(obj));
+            bases = []; turrets = [];
+            createBases(); createTurrets();
+            shipGroup.quaternion.set(0, 0, 0, 1);
+            shipGroup.position.set(0, PLANET_RADIUS + ALTITUDE, 0);
+        }
+
+        function createBases() {
+            const baseGeo = new THREE.CylinderGeometry(BASE_RADIUS, BASE_RADIUS, BASE_HEIGHT, 6);
+            for (let i = 0; i < 4; i++) {
+                const isPlayer = (i === 0);
+                const base = new THREE.Mesh(baseGeo, new THREE.MeshBasicMaterial({ color: isPlayer ? 0x00ffff : 0xff0000, wireframe: true }));
+                let pos = getRandomPlanetPos();
+                base.position.copy(pos);
+                const normal = pos.clone().normalize();
+                base.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
+                base.position.add(normal.multiplyScalar(BASE_HEIGHT * 0.4));
+                base.userData = { hp: 8, active: true, dying: false, isPlayer, normal: normal.clone(), origin: base.position.clone(), sink: 0 };
+                scene.add(base); bases.push(base);
+            }
+        }
+
+        function createTurrets() {
+            const turretGeo = new THREE.BoxGeometry(BASE_RADIUS * 2, BASE_HEIGHT, BASE_RADIUS * 2);
+            for (let i = 0; i < 2; i++) {
+                const turret = new THREE.Mesh(turretGeo, new THREE.MeshBasicMaterial({ color: 0x8800ff, wireframe: true }));
+                let pos = getRandomPlanetPos();
+                turret.position.copy(pos);
+                const normal = pos.clone().normalize();
+                turret.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
+                turret.position.add(normal.multiplyScalar(BASE_HEIGHT * 0.4));
+                turret.userData = { hp: 8, active: true, dying: false, normal: normal.clone(), origin: turret.position.clone(), sink: 0, fireTimer: 0 };
+                scene.add(turret); turrets.push(turret);
+            }
+        }
+
+        function getRandomPlanetPos() {
+            const phi = Math.acos(2 * Math.random() - 1);
+            const theta = 2 * Math.PI * Math.random();
+            return new THREE.Vector3().setFromSphericalCoords(PLANET_RADIUS, phi, theta);
+        }
+
+        // --- 入力制御 ---
+        window.addEventListener('keydown', e => {
+            keys[e.code] = true;
+            // 下キーでエンジンのON/OFFをトグル
+            if (e.code === 'ArrowDown' || e.code === 'KeyS') isEngineOn = !isEngineOn;
+        });
+        window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+        // タッチ操作用
+        window.addEventListener('touchstart', e => { isPointerDown = true; startPointerX = e.touches[0].clientX; }, { passive: false });
+        window.addEventListener('touchmove', e => { if (isPointerDown) currentRelativeX = e.touches[0].clientX - startPointerX; }, { passive: false });
+        window.addEventListener('touchend', () => { isPointerDown = false; currentRelativeX = 0; });
+
+        // --- ループ ---
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+
+            if (currentState === GameState.GAME) {
+                timeLeft -= delta;
+
+                // 旋回
+                let targetTurn = 0;
+                if (keys['ArrowLeft']) targetTurn += MAX_TURN_SPEED;
+                if (keys['ArrowRight']) targetTurn -= MAX_TURN_SPEED;
+                if (isPointerDown) targetTurn = THREE.MathUtils.clamp(-currentRelativeX * 0.0005, -MAX_TURN_SPEED, MAX_TURN_SPEED);
+
+                turnSpringVelocity += (targetTurn - currentTurnVelocity) * 0.25;
+                turnSpringVelocity *= 0.85;
+                currentTurnVelocity += turnSpringVelocity;
+
+                shipGroup.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), currentTurnVelocity));
+
+                // 前進（エンジンONの時のみ）
+                if (isEngineOn) {
+                    shipGroup.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), FORWARD_SPEED));
+                }
+
+                shipGroup.position.set(0, PLANET_RADIUS + ALTITUDE, 0).applyQuaternion(shipGroup.quaternion);
+                shipMesh.rotation.z = -currentTurnVelocity * 12;
+
+                // サーバー同期
+                socket.emit('update_move', { quat: shipGroup.quaternion.toArray() });
+
+                // 射撃（スペース または 上キー）
+                if (fireTimer > 0) fireTimer--;
+                if ((keys['Space'] || keys['ArrowUp'] || isPointerDown) && fireTimer <= 0) {
+                    const b = playerBulletPool.find(b => !b.userData.active);
+                    if (b) { b.visible = true; b.userData.active = true; b.userData.distance = 0; b.quaternion.copy(shipGroup.quaternion); fireTimer = 14; }
+                }
+
+                // 弾丸更新
+                playerBulletPool.forEach(b => {
+                    if (!b.userData.active) return;
+                    b.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), BULLET_SPEED));
+                    b.position.set(0, PLANET_RADIUS + ALTITUDE, 0).applyQuaternion(b.quaternion);
+                    [...bases, ...turrets].forEach(obj => {
+                        if (obj.userData.active && !obj.userData.dying && !obj.userData.isPlayer && b.position.distanceTo(obj.position) < 5) {
+                            b.userData.active = false; b.visible = false; obj.userData.hp--;
+                            if (obj.userData.hp <= 0) obj.userData.dying = true;
+                        }
+                    });
+                    if ((b.userData.distance += BULLET_SPEED) > Math.PI) { b.userData.active = false; b.visible = false; }
+                });
+
+                // UI
+                const targets = [...bases.filter(b => !b.userData.isPlayer), ...turrets].filter(t => t.userData.active).length;
+                document.getElementById('ui-left').innerText = `TARGETS: ${targets} | ENGINE: ${isEngineOn ? "ON" : "OFF"}`;
+                document.getElementById('ui-right').innerText = `HP: ${playerHP}% | TIME: ${Math.floor(timeLeft)}`;
+
+                if (playerHP <= 0 || timeLeft <= 0) changeState(GameState.GAMEOVER);
+            }
+            renderer.render(scene, camera);
+        }
+
+        resetGameData();
+        animate();
+    </script>
+</body>
+
+</html>

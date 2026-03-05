@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>3D Planet Fighter - Fix Online</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #000;
+            touch-action: none;
+            font-family: 'Courier New', Courier, monospace;
+            user-select: none;
+        }
+
+        .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #00ff00;
+            text-align: center;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 10;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            right: 20px;
+            color: #00ff00;
+            pointer-events: none;
+            z-index: 5;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        button {
+            padding: 15px 30px;
+            background: transparent;
+            color: #00ff00;
+            border: 2px solid #00ff00;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 20px;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        <div id="ui-left">CONNECTING...</div>
+        <div id="ui-right"></div>
+    </div>
+    <div id="screen-title" class="overlay">
+        <h1>PLANET FIGHTER</h1>
+        <button onclick="changeState('GAME')">ENGAGE</button>
+    </div>
+
+    <script
+        type="importmap">{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }</script>
+    <script src="/socket.io/socket.io.js"></script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        const socket = io();
+
+        const PLANET_RADIUS = 100, ALTITUDE = 2, FORWARD_SPEED = 0.002, MAX_TURN_SPEED = 0.025;
+        const BULLET_SPEED = 0.015, FIRE_COOLDOWN = 10; // 連射速度制限（フレーム数）
+
+        let playerHP = 100, isEngineOn = true, fireTimer = 0;
+        let otherPlayers = {}, bases = [], turrets = [], items = [], particles = [];
+        let playerBullets = [], enemyBullets = [];
+        const keys = {};
+
+        const GameState = { TITLE: 'TITLE', GAME: 'GAME' };
+        let currentState = GameState.TITLE;
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // 惑星（不透明）
+        const planetGroup = new THREE.Group();
+        const sphereGeo = new THREE.SphereGeometry(PLANET_RADIUS, 32, 32);
+        planetGroup.add(new THREE.Mesh(sphereGeo, new THREE.MeshBasicMaterial({ color: 0x000800 })));
+        planetGroup.add(new THREE.Mesh(sphereGeo, new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true })));
+        scene.add(planetGroup);
+
+        // 自機
+        const shipGroup = new THREE.Group();
+        const shipMesh = new THREE.Mesh(new THREE.ConeGeometry(1.5, 4, 4).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xffff00, wireframe: true }));
+        shipGroup.add(shipMesh); shipGroup.add(camera);
+        camera.position.set(0, 30, 0); camera.lookAt(0, 0, 10);
+        scene.add(shipGroup);
+
+        // 弾丸プール
+        const createBullets = (count, color) => Array.from({ length: count }, () => {
+            const b = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 2, 4).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color, wireframe: true }));
+            b.visible = false; b.userData = { active: false, dist: 0 };
+            scene.add(b); return b;
+        });
+        playerBullets = createBullets(20, 0xffaa00);
+        enemyBullets = createBullets(20, 0xff00ff);
+
+        // --- 他プレイヤー追加関数 ---
+        function addOtherPlayer(id) {
+            if (otherPlayers[id]) return;
+            const m = new THREE.Mesh(new THREE.ConeGeometry(1.5, 4, 4).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xff4444, wireframe: true }));
+            scene.add(m);
+            otherPlayers[id] = m;
+        }
+
+        // --- 通信イベント ---
+        socket.on('init_world', data => {
+            setupWorld(data.world);
+            Object.keys(data.players).forEach(id => { if (id !== socket.id) addOtherPlayer(id); });
+        });
+
+        socket.on('player_join', data => { addOtherPlayer(data.id); });
+
+        socket.on('player_moved', d => {
+            if (otherPlayers[d.id]) {
+                otherPlayers[d.id].quaternion.fromArray(d.quat);
+                otherPlayers[d.id].position.set(0, PLANET_RADIUS + ALTITUDE, 0).applyQuaternion(otherPlayers[d.id].quaternion);
+            }
+        });
+
+        socket.on('player_leave', id => { if (otherPlayers[id]) { scene.remove(otherPlayers[id]); delete otherPlayers[id]; } });
+
+        socket.on('world_update', world => {
+            world.bases.forEach((b, i) => { if (!b.active && !bases[i].userData.dying) bases[i].userData.dying = true; });
+            world.items.forEach((item, i) => { if (!item.active) items[i].visible = false; });
+        });
+
+        function setupWorld(world) {
+            const createObj = (data, geo, color) => {
+                const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color, wireframe: true }));
+                const pos = new THREE.Vector3().setFromSphericalCoords(PLANET_RADIUS, data.pos.phi, data.pos.theta);
+                mesh.position.copy(pos);
+                mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), pos.clone().normalize());
+                mesh.userData = { id: data.id, active: true, dying: false, origin: pos.clone(), normal: pos.clone().normalize(), sink: 0 };
+                scene.add(mesh); return mesh;
+            };
+            world.bases.forEach(b => bases.push(createObj(b, new THREE.CylinderGeometry(4, 4, 6, 6), b.isPlayer ? 0x00ffff : 0xff4444)));
+            world.items.forEach(i => items.push(createObj(i, new THREE.IcosahedronGeometry(1.5), 0x00ffff)));
+        }
+
+        // --- ループ ---
+        window.changeState = (s) => { currentState = s; document.getElementById('screen-title').classList.add('hidden'); };
+        window.addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'ArrowDown') isEngineOn = !isEngineOn; });
+        window.addEventListener('keyup', e => keys[e.code] = false);
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (currentState === GameState.GAME) {
+                // 移動更新
+                let turn = 0;
+                if (keys['ArrowLeft']) turn += MAX_TURN_SPEED;
+                if (keys['ArrowRight']) turn -= MAX_TURN_SPEED;
+                shipGroup.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), turn));
+                if (isEngineOn) shipGroup.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), FORWARD_SPEED));
+                shipGroup.position.set(0, PLANET_RADIUS + ALTITUDE, 0).applyQuaternion(shipGroup.quaternion);
+
+                socket.emit('update_move', { quat: shipGroup.quaternion.toArray() });
+
+                // 連射速度の制限
+                if (fireTimer > 0) fireTimer--;
+                if ((keys['ArrowUp'] || keys['Space']) && fireTimer === 0) {
+                    const b = playerBullets.find(b => !b.userData.active);
+                    if (b) {
+                        b.visible = true; b.userData.active = true; b.userData.dist = 0;
+                        b.quaternion.copy(shipGroup.quaternion);
+                        fireTimer = FIRE_COOLDOWN; // クールダウン設定
+                    }
+                }
+
+                // 弾丸更新
+                playerBullets.forEach(b => {
+                    if (!b.userData.active) return;
+                    b.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), BULLET_SPEED));
+                    b.position.set(0, PLANET_RADIUS + ALTITUDE, 0).applyQuaternion(b.quaternion);
+
+                    [...bases].forEach(obj => {
+                        if (obj.userData.active && !obj.userData.dying && b.position.distanceTo(obj.position) < 6) {
+                            socket.emit('object_hit', { type: 'bases', id: obj.userData.id });
+                            b.userData.active = false; b.visible = false;
+                        }
+                    });
+                    if ((b.userData.dist += BULLET_SPEED) > Math.PI) { b.userData.active = false; b.visible = false; }
+                });
+
+                // アイテム
+                items.forEach(item => {
+                    if (item.visible && shipGroup.position.distanceTo(item.position) < 5) {
+                        socket.emit('object_hit', { type: 'items', id: item.userData.id });
+                    }
+                });
+
+                // 破壊演出
+                bases.forEach(obj => {
+                    if (obj.userData.dying) {
+                        obj.userData.sink += 0.1;
+                        obj.position.copy(obj.userData.origin).sub(obj.userData.normal.clone().multiplyScalar(obj.userData.sink));
+                        if (obj.userData.sink > 10) { obj.userData.active = false; obj.visible = false; }
+                    }
+                });
+
+                document.getElementById('ui-left').innerText = `HP: ${playerHP}% | ENGINE: ${isEngineOn ? 'ON' : 'OFF'}`;
+                document.getElementById('ui-right').innerText = `ONLINE: ${Object.keys(otherPlayers).length + 1}`;
+            }
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+
+</html>
