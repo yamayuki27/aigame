@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Word Slicer - Segment Interpreter (v19-reverted-logic)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+    <style>
+        :root {
+            --accent-color: #4CAF50;
+            --error-color: #ff5733;
+        }
+
+        body {
+            margin: 0;
+            background: #0d0d0d;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            min-height: 100vh;
+            color: #eee;
+            font-family: 'Georgia', serif;
+            overflow: hidden;
+            touch-action: none;
+        }
+
+        #game-container {
+            position: relative;
+            width: 100%;
+            max-width: 1000px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        #game-canvas {
+            background: #111;
+            border-top: 1px solid #333;
+            border-bottom: 1px solid #333;
+            width: 100%;
+            height: auto;
+            touch-action: none;
+        }
+
+        @media (orientation: portrait) {
+            #game-canvas {
+                width: 100vw;
+            }
+        }
+
+        #ui-panel {
+            width: 95%;
+            text-align: center;
+            margin-top: 10px;
+            flex-grow: 1;
+        }
+
+        #answer-display {
+            min-height: 60px;
+            font-size: clamp(1rem, 5vw, 1.6rem);
+            margin-bottom: 5px;
+            color: #fff;
+            line-height: 1.4;
+            padding: 0 10px;
+            word-break: break-all;
+        }
+
+        #translation-display {
+            min-height: 30px;
+            font-size: clamp(0.8rem, 4vw, 1.1rem);
+            color: #aaa;
+            font-style: italic;
+            margin-bottom: 10px;
+            padding: 0 20px;
+        }
+
+        #status-bar {
+            display: flex;
+            justify-content: space-between;
+            width: 90%;
+            max-width: 1000px;
+            margin-top: 10px;
+            margin-bottom: 5px;
+            font-size: clamp(0.9rem, 4vw, 1.2rem);
+            font-weight: bold;
+        }
+
+        #life-display {
+            color: var(--error-color);
+        }
+
+        #stage-display {
+            color: var(--accent-color);
+        }
+
+        #blade-guide {
+            position: absolute;
+            left: 30%;
+            top: 0;
+            width: 2px;
+            height: 100%;
+            background: #fff;
+            box-shadow: 0 0 10px #fff;
+            pointer-events: none;
+            z-index: 5;
+        }
+
+        .blade-reject {
+            animation: reject 0.2s cubic-bezier(.36, .07, .19, .97) both;
+            background: #ff4444 !important;
+            box-shadow: 0 0 20px #ff0000 !important;
+        }
+
+        @keyframes reject {
+
+            0%,
+            100% {
+                transform: translateX(0);
+            }
+
+            20%,
+            60% {
+                transform: translateX(-10px);
+            }
+
+            40%,
+            80% {
+                transform: translateX(10px);
+            }
+        }
+
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+            text-align: center;
+        }
+
+        #overlay h1 {
+            font-size: clamp(2rem, 10vw, 4rem);
+            color: var(--accent-color);
+            margin-bottom: 10px;
+        }
+
+        .pulse {
+            animation: pulse-text 1.5s infinite;
+        }
+
+        @keyframes pulse-text {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.3;
+            }
+        }
+
+        .controls-hint {
+            color: #666;
+            font-size: 0.8rem;
+            margin-top: 10px;
+        }
+
+        kbd {
+            background: #222;
+            padding: 2px 4px;
+            border-radius: 4px;
+            border: 1px solid #444;
+        }
+
+        .heart-shake {
+            display: inline-block;
+            animation: shake 0.4s;
+        }
+
+        @keyframes shake {
+
+            0%,
+            100% {
+                transform: translateX(0);
+            }
+
+            25% {
+                transform: translateX(-5px);
+            }
+
+            75% {
+                transform: translateX(5px);
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="status-bar">
+        <div id="stage-display">STAGE: 1</div>
+        <div id="life-display">LIFE: ❤❤❤</div>
+    </div>
+
+    <div id="game-container">
+        <canvas id="game-canvas" width="1000" height="400"></canvas>
+        <div id="blade-guide"></div>
+
+        <div id="overlay">
+            <h1 id="overlay-title">WORD SLICER</h1>
+            <p id="overlay-msg" class="pulse">Tap Screen to Start</p>
+            <div id="instruction-ui" class="controls-hint">
+                Canvas Left/Right: Move | Below Canvas: SLICE
+            </div>
+        </div>
+    </div>
+
+    <div id="ui-panel">
+        <div id="answer-display">...</div>
+        <div id="translation-display"></div>
+        <div class="controls-hint">
+            <kbd>L-Shift</kbd> / <kbd>R-Shift</kbd> move, <kbd>Space</kbd> slice
+        </div>
+    </div>
+
+    <script>
+        class SoundEffect {
+            constructor() {
+                this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            resume() { if (this.ctx.state === 'suspended') this.ctx.resume(); }
+
+            playMove(freq = 440) {
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(freq, this.ctx.currentTime);
+                gain.gain.setValueAtTime(0.05, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.1);
+                osc.connect(gain); gain.connect(this.ctx.destination);
+                osc.start(); osc.stop(this.ctx.currentTime + 0.1);
+            }
+
+            playSuccess() {
+                const now = this.ctx.currentTime;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(880, now);
+                osc.frequency.exponentialRampToValueAtTime(1320, now + 0.1);
+                gain.gain.setValueAtTime(0.1, now);
+                gain.gain.linearRampToValueAtTime(0, now + 0.3);
+                osc.connect(gain); gain.connect(this.ctx.destination);
+                osc.start(); osc.stop(now + 0.3);
+            }
+
+            playSlice() {
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(880, this.ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(110, this.ctx.currentTime + 0.2);
+                gain.gain.setValueAtTime(0.1, this.ctx.currentTime);
+                gain.gain.linearRampToValueAtTime(0, this.ctx.currentTime + 0.2);
+                osc.connect(gain); gain.connect(this.ctx.destination);
+                osc.start(); osc.stop(this.ctx.currentTime + 0.2);
+            }
+
+            playMiss() {
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(110, this.ctx.currentTime);
+                gain.gain.setValueAtTime(0.1, this.ctx.currentTime);
+                gain.gain.linearRampToValueAtTime(0, this.ctx.currentTime + 0.3);
+                osc.connect(gain); gain.connect(this.ctx.destination);
+                osc.start(); osc.stop(this.ctx.currentTime + 0.3);
+            }
+        }
+
+        const sfx = new SoundEffect();
+        const { Engine, Bodies, Composite, Body } = Matter;
+
+        const TextData = [
+            { segments: [{ en: "The reason this sentence is difficult to read is because there are no breaks between the words.", ja: "この文章が読みにくい理由は、単語の間に区切りがないからです。" }, { en: "Make it easier to read by inserting spaces correctly.", ja: "正しくスペースを入れて読みやすくしてください。" }] },
+            { segments: [{ en: "Last Christmas, ", ja: "去年のクリスマス、" }, { en: "I gave you my heart.", ja: "僕は君に心を捧げた。" }, { en: "But the very next day, ", ja: "でもその翌日、" }, { en: "You gave it away.", ja: "君はそれを捨ててしまった。" }] },
+            { segments: [{ en: "I am a cat.", ja: "吾輩は猫である。" }, { en: "No name yet.", ja: "名前はまだ無い。" }, { en: "I have no idea where I was born.", ja: "どこで生れたかとんと見当がつかぬ。" }] },
+            { segments: [{ en: "With the recklessness inherited from his parents, ", ja: "親譲りの無鉄砲で" }, { en: "he has been losing money ever since he was a small child.", ja: "小供の時から損ばかりしている。" }] }
+        ];
+
+        const COLORS = ['#F4D35E', '#FAF0CA', '#EE964B', '#F95738', '#0D3B66', '#EBEBD3'];
+        const CHAR_SPACING = 38;
+        const RAIL_Y = 200;
+        const BLADE_X = 300;
+        const START_X = 1000;
+
+        let engine = Engine.create();
+        let canvas = document.getElementById('game-canvas');
+        let ctx = canvas.getContext('2d');
+        let characters = [];
+        let targetScrollOffset = 0;
+        let currentScrollOffset = 0;
+        let charIdx = 0, lastRawIdx = 0, missCount = 0, stageCount = 1;
+        let logText = "", rawText = "", currentSegments = [], pureChars = [];
+        let gameState = 'title';
+
+        function resetGame(fullReset) {
+            if (fullReset) { missCount = 0; stageCount = 1; }
+            charIdx = 0; lastRawIdx = 0; logText = "";
+            targetScrollOffset = 0; currentScrollOffset = 0;
+
+            const data = TextData[Math.floor(Math.random() * TextData.length)];
+            currentSegments = data.segments;
+            rawText = currentSegments.map(s => s.en).join(" ");
+
+            pureChars = [];
+            for (let i = 0; i < rawText.length; i++) {
+                if (/[a-zA-Z]/.test(rawText[i])) {
+                    pureChars.push({ char: rawText[i].toUpperCase(), rawIdx: i });
+                }
+            }
+
+            Composite.clear(engine.world);
+            characters = [];
+            document.getElementById('answer-display').innerText = "...";
+            document.getElementById('answer-display').style.color = "#fff";
+            document.getElementById('translation-display').innerText = "";
+            updateStatusDisplay(false);
+        }
+
+        function updateStatusDisplay(shouldShake) {
+            const lifeElem = document.getElementById('life-display');
+            lifeElem.innerText = `LIFE: ${"❤".repeat(Math.max(0, 3 - missCount))}`;
+            document.getElementById('stage-display').innerText = `STAGE: ${stageCount}`;
+            if (shouldShake) {
+                lifeElem.classList.remove('heart-shake');
+                void lifeElem.offsetWidth;
+                lifeElem.classList.add('heart-shake');
+            }
+        }
+
+        function updateTranslation() {
+            let revealedJa = "";
+            let cumulativeEnLen = 0;
+            for (const seg of currentSegments) {
+                const segEndPos = cumulativeEnLen + seg.en.length;
+                if (lastRawIdx >= segEndPos - 1) revealedJa += seg.ja;
+                cumulativeEnLen += seg.en.length + 1;
+            }
+            document.getElementById('translation-display').innerText = revealedJa;
+        }
+
+        function handleInput(type) {
+            if (gameState !== 'playing') return;
+            if (type === 'forward') { targetScrollOffset -= CHAR_SPACING; sfx.playMove(550); }
+            if (type === 'backward') { targetScrollOffset += CHAR_SPACING; sfx.playMove(440); }
+            if (type === 'slice') performCut();
+        }
+
+        function spawn(idx) {
+            const data = pureChars[idx];
+            const body = Bodies.rectangle(START_X, RAIL_Y, 34, 50, { frictionAir: 0.02 });
+            body.isScrolling = true;
+            body.pureIdx = idx;
+            body.displayChar = data.char;
+            body.rawIdx = data.rawIdx;
+            body.colorHex = COLORS[idx % COLORS.length];
+            characters.push(body);
+            Composite.add(engine.world, body);
+        }
+
+        // slicer2のカット判定ロジックに戻した部分
+        function performCut() {
+            let closest = null, minDist = 25;
+            characters.forEach(char => {
+                if (!char.isScrolling) return;
+                const d = Math.abs(char.position.x - BLADE_X);
+                if (d < minDist) { minDist = d; closest = char; }
+            });
+
+            // 文末判定
+            const lastActive = characters.filter(c => c.isScrolling).sort((a, b) => b.pureIdx - a.pureIdx)[0];
+            const isEnd = lastActive && Math.abs(lastActive.position.x - BLADE_X) < 40 && lastActive.pureIdx === pureChars.length - 1;
+
+            if (isEnd) {
+                sfx.playSuccess(); // 成功音
+                logText += rawText.substring(lastRawIdx);
+                lastRawIdx = rawText.length;
+                document.getElementById('answer-display').innerText = logText;
+                document.getElementById('answer-display').style.color = "#4CAF50";
+                updateTranslation();
+                characters.forEach(c => { if (c.isScrolling) { c.isScrolling = false; Body.applyForce(c, c.position, { x: -0.02, y: 0.02 }); } });
+                stageCount++; missCount = 0;
+                gameState = 'clearing';
+                setTimeout(() => { gameState = 'playing'; resetGame(false); }, 2000);
+                return;
+            }
+
+            if (closest) {
+                // slicer2仕様：一つ前のインデックスをターゲットにする
+                const targetPureIdx = closest.pureIdx - 1;
+                if (targetPureIdx < 0 && lastRawIdx === 0) return;
+                const endRawIdx = (targetPureIdx >= 0) ? pureChars[targetPureIdx].rawIdx : lastRawIdx - 1;
+
+                let suffix = "", nextIdx = endRawIdx + 1;
+                while (nextIdx < rawText.length && !/[a-zA-Z]/.test(rawText[nextIdx])) { suffix += rawText[nextIdx]; nextIdx++; }
+
+                // slicer2仕様：スペース（suffix）があればカット成功、スペース混入チェックは行わない
+                if (suffix.length > 0) {
+                    sfx.playSuccess(); // 成功SE
+                    characters.forEach(char => {
+                        if (char.isScrolling && char.pureIdx <= targetPureIdx) {
+                            char.isScrolling = false;
+                            Body.applyForce(char, char.position, { x: -0.02, y: 0.02 });
+                        }
+                    });
+                    logText += rawText.substring(lastRawIdx, endRawIdx + 1) + suffix;
+                    lastRawIdx = nextIdx;
+                    document.getElementById('answer-display').innerText = logText;
+                    updateTranslation();
+                } else {
+                    // ミス判定
+                    sfx.playMiss();
+                    document.getElementById('blade-guide').classList.add('blade-reject');
+                    setTimeout(() => document.getElementById('blade-guide').classList.remove('blade-reject'), 200);
+                    missCount++;
+                    updateStatusDisplay(true);
+                    if (missCount >= 3) {
+                        gameState = 'gameOver';
+                        document.getElementById('overlay-title').innerText = "GAME OVER";
+                        document.getElementById('overlay-msg').innerText = "Tap to Title";
+                        document.getElementById('overlay').style.display = 'flex';
+                    }
+                }
+            }
+        }
+
+        function update() {
+            if (gameState === 'playing' || gameState === 'clearing') {
+                Engine.update(engine, 1000 / 60);
+                currentScrollOffset += (targetScrollOffset - currentScrollOffset) * 0.2;
+                while (charIdx < pureChars.length) {
+                    const nextX = START_X + (charIdx * CHAR_SPACING) + currentScrollOffset;
+                    if (nextX < 1200) { spawn(charIdx); charIdx++; } else break;
+                }
+            }
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            characters.forEach((char, index) => {
+                if (char.isScrolling) {
+                    const basePos = START_X + (char.pureIdx * CHAR_SPACING);
+                    Body.setPosition(char, { x: basePos + currentScrollOffset, y: RAIL_Y });
+                    char.angle = 0;
+                }
+                const { x, y } = char.position;
+                ctx.save();
+                ctx.translate(x, y); ctx.rotate(char.angle);
+                ctx.fillStyle = `rgba(${parseInt(char.colorHex.slice(1, 3), 16)},${parseInt(char.colorHex.slice(3, 5), 16)},${parseInt(char.colorHex.slice(5, 7), 16)},0.2)`;
+                ctx.fillRect(-17, -25, 34, 50);
+                ctx.fillStyle = "#FFFFFF";
+                ctx.font = "bold 26px sans-serif";
+                ctx.textAlign = "center"; ctx.textBaseline = "middle";
+                ctx.fillText(char.displayChar, 0, 0);
+                ctx.restore();
+                if (y > 600) { Composite.remove(engine.world, char); characters.splice(index, 1); }
+            });
+            requestAnimationFrame(update);
+        }
+
+        function init() {
+            window.addEventListener('keydown', (e) => {
+                if (e.code === 'ShiftLeft') handleInput('forward');
+                if (e.code === 'ShiftRight') handleInput('backward');
+                if (e.code === 'Space') handleInput('slice');
+                if (gameState === 'title' || gameState === 'gameOver') startGame();
+            });
+
+            const triggerStart = (e) => {
+                sfx.resume();
+                if (gameState === 'title' || gameState === 'gameOver') {
+                    startGame();
+                    return;
+                }
+                if (gameState !== 'playing') return;
+
+                const rect = canvas.getBoundingClientRect();
+                const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+                const touchX = clientX - rect.left;
+                const touchY = clientY - rect.top;
+
+                if (touchY <= rect.height && touchY >= 0) {
+                    const relativeX = touchX / rect.width;
+                    if (relativeX < 0.5) handleInput('forward');
+                    else handleInput('backward');
+                } else if (touchY > rect.height) {
+                    handleInput('slice');
+                }
+                if (e.cancelable) e.preventDefault();
+            };
+
+            canvas.addEventListener('touchstart', triggerStart, { passive: false });
+            document.getElementById('ui-panel').addEventListener('touchstart', triggerStart, { passive: false });
+            document.getElementById('overlay').addEventListener('touchstart', triggerStart);
+            canvas.addEventListener('mousedown', triggerStart);
+            document.getElementById('ui-panel').addEventListener('mousedown', triggerStart);
+            document.getElementById('overlay').addEventListener('mousedown', triggerStart);
+
+            requestAnimationFrame(update);
+        }
+
+        function startGame() {
+            if (gameState === 'gameOver') {
+                gameState = 'title';
+                document.getElementById('overlay-title').innerText = "WORD SLICER";
+                document.getElementById('overlay-msg').innerText = "Tap to Start";
+                return;
+            }
+            gameState = 'playing';
+            document.getElementById('overlay').style.display = 'none';
+            resetGame(true);
+        }
+
+        init();
+    </script>
+</body>
+
+</html>
