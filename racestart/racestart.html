@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Racing Reflex Timer (v23 - Audio Fixed Complete)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #141414;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+            touch-action: none;
+        }
+
+        #canvas-container {
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            border-radius: 8px;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="canvas-container"></div>
+
+    <script>
+        // --- ゲーム状態管理 ---
+        let gameState = "READY";
+        let signals = [false, false, false, false, false];
+        let timerStart = 0;
+        let reactionTime = 0;
+        let lastSignalTime = 0;
+        let blackoutDelay = 0;
+        let signalCount = 0;
+
+        // 余韻（ホールド）システム用
+        let stateEndTime = 0;
+        let holdDuration = 3000;
+
+        // 履歴とベスト記録用
+        let history = [];
+        let bestTime = Infinity;
+        let playCounter = 0;
+
+        // キー・タッチの状態管理（一元管理用）
+        let leftShiftPressed = false;
+        let rightShiftPressed = false;
+        let lastLeftShiftState = false;
+
+        // 物理入力フラグ（競合・上書き防止）
+        let kbdLeftPressed = false;
+        let kbdRightPressed = false;
+        let touchLeftPressed = false;
+        let touchRightPressed = false;
+
+        // サウンド用制御変数
+        let engineFreq = 60;
+
+        // 🏎️ 車の演出用変数
+        let carX = -150;
+        let carY = 275;
+        let carSpeed = 0;
+        let carTargetX = 220;
+
+        // ベースとなる仮想画面サイズ
+        const V_WIDTH = 950;
+        const V_HEIGHT = 450;
+
+        // =========================================================================
+        // 🔊 【完全復活】内蔵サウンドシステム (Web Audio API)
+        // =========================================================================
+        let audioCtx = null;
+        let engineOsc = null;
+        let engineGain = null;
+
+        function initAudio() {
+            if (audioCtx) return;
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+            engineOsc = audioCtx.createOscillator();
+            engineGain = audioCtx.createGain();
+
+            engineOsc.type = 'sawtooth';
+            engineOsc.frequency.setValueAtTime(60, audioCtx.currentTime);
+            engineGain.gain.setValueAtTime(0, audioCtx.currentTime);
+
+            engineOsc.connect(engineGain);
+            engineGain.connect(audioCtx.destination);
+            engineOsc.start();
+        }
+
+        function resumeAudioContext() {
+            if (!audioCtx) initAudio();
+            if (audioCtx && audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        }
+
+        function playBeepSound(freq, duration) {
+            resumeAudioContext();
+            if (!audioCtx) return;
+
+            let osc = audioCtx.createOscillator();
+            let gainNode = audioCtx.createGain();
+
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+
+            gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+
+            osc.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            osc.start();
+            osc.stop(audioCtx.currentTime + duration);
+        }
+
+        function setEngineSound(freq, volume) {
+            resumeAudioContext();
+            if (!engineOsc || !engineGain) return;
+
+            engineOsc.frequency.setTargetAtTime(freq, audioCtx.currentTime, 0.05);
+            engineGain.gain.setTargetAtTime(volume, audioCtx.currentTime, 0.05);
+        }
+        // =========================================================================
+
+        function setup() {
+            calculateCanvasSize();
+            let canvas = createCanvas(currentWidth, currentHeight);
+            canvas.parent('canvas-container');
+            textAlign(CENTER, CENTER);
+
+            // --- PC用：キーボードイベントリスナー（最優先・ブラウザブロック解除） ---
+            window.addEventListener('keydown', function (e) {
+                // キーが押された瞬間に最優先でブラウザのオーディオロックを解除
+                resumeAudioContext();
+
+                if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+                    e.preventDefault();
+                }
+
+                let now = performance.now();
+                if (e.code === 'ShiftLeft') {
+                    kbdLeftPressed = true;
+                    handleLeftPress(now);
+                }
+                if (e.code === 'ShiftRight') {
+                    kbdRightPressed = true;
+                    handleRightPress(now);
+                }
+            }, { passive: false });
+
+            window.addEventListener('keyup', function (e) {
+                if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+                    e.preventDefault();
+                }
+                let now = performance.now();
+                if (e.code === 'ShiftLeft') {
+                    kbdLeftPressed = false;
+                    handleLeftRelease(now);
+                }
+                if (e.code === 'ShiftRight') {
+                    kbdRightPressed = false;
+                    handleRightRelease(now);
+                }
+            }, { passive: false });
+        }
+
+        function windowResized() {
+            calculateCanvasSize();
+            resizeCanvas(currentWidth, currentHeight);
+        }
+
+        let currentWidth, currentHeight;
+        function calculateCanvasSize() {
+            let ratio = V_WIDTH / V_HEIGHT;
+            if (windowWidth / windowHeight > ratio) {
+                currentHeight = windowHeight - 10;
+                currentWidth = currentHeight * ratio;
+            } else {
+                currentWidth = windowWidth - 10;
+                currentHeight = currentWidth / ratio;
+            }
+        }
+
+        // =========================================================================
+        // 👆 判定集約コアロジック
+        // =========================================================================
+        function handleLeftPress(performanceNowTime) {
+            leftShiftPressed = true;
+        }
+
+        function handleRightPress(performanceNowTime) {
+            rightShiftPressed = true;
+            if (gameState === "RACING" && !leftShiftPressed) {
+                triggerSuccess(performanceNowTime);
+            }
+        }
+
+        function handleLeftRelease(performanceNowTime) {
+            if (!kbdLeftPressed && !touchLeftPressed) {
+                leftShiftPressed = false;
+                if (gameState === "LIGHTING" || gameState === "WAITING_BLACKOUT") {
+                    triggerFalseStart(millis());
+                }
+                else if (gameState === "RACING") {
+                    if (rightShiftPressed) {
+                        triggerSuccess(performanceNowTime);
+                    }
+                }
+            }
+        }
+
+        function handleRightRelease(performanceNowTime) {
+            if (!kbdRightPressed && !touchRightPressed) {
+                rightShiftPressed = false;
+            }
+        }
+
+        // --- 【バグ修正】PC環境の時はスキャンをスキップしてオーディオ干渉を防ぐタッチスキャン ---
+        function checkTouches() {
+            // PC環境（タッチ配列が空）のときは、スマホ用の状態更新処理を完全にパスさせて音源保護
+            if (touches.length === 0) {
+                // キーボードもタッチも押されていない場合はフラグをクリーンに保つ
+                if (!kbdLeftPressed) touchLeftPressed = false;
+                if (!kbdRightPressed) touchRightPressed = false;
+                return;
+            }
+
+            resumeAudioContext();
+            let now = performance.now();
+            let currentLeftTouch = false;
+            let currentRightTouch = false;
+
+            for (let i = 0; i < touches.length; i++) {
+                if (touches[i].x < width / 2) {
+                    currentLeftTouch = true;
+                } else {
+                    currentRightTouch = true;
+                }
+            }
+
+            if (currentLeftTouch && !touchLeftPressed) {
+                touchLeftPressed = true;
+                handleLeftPress(now);
+            }
+            if (!currentLeftTouch && touchLeftPressed) {
+                touchLeftPressed = false;
+                handleLeftRelease(now);
+            }
+
+            if (currentRightTouch && !touchRightPressed) {
+                touchRightPressed = true;
+                handleRightPress(now);
+            }
+            if (!currentRightTouch && touchRightPressed) {
+                touchRightPressed = false;
+                handleRightRelease(now);
+            }
+        }
+        // =========================================================================
+
+        function draw() {
+            // 毎フレームのタッチスキャン（PC時は安全にパスされます）
+            checkTouches();
+
+            background(20);
+
+            push();
+            scale(width / V_WIDTH, height / V_HEIGHT);
+
+            updateGameLogic();
+            updateCarPhysics();
+
+            drawRoad();
+            drawUI();
+            drawHistory();
+
+            lastLeftShiftState = leftShiftPressed;
+            pop();
+        }
+
+        function updateGameLogic() {
+            let now = millis();
+
+            if (gameState === "READY") {
+                setEngineSound(60, 0); // アイドリング音完全停止
+
+                if (leftShiftPressed && !lastLeftShiftState && !rightShiftPressed) {
+                    gameState = "LIGHTING";
+                    lastSignalTime = now;
+                    signalCount = 0;
+                    signals.fill(false);
+
+                    engineFreq = 50;
+                    setEngineSound(engineFreq, 0.2); // 低音エンジン始動音復元
+                }
+            }
+            else if (gameState === "LIGHTING") {
+                setEngineSound(50 + sin(now * 0.05) * 3, 0.2); // カウントダウン中のうねり音復元
+
+                if (now - lastSignalTime >= 1000) {
+                    if (signalCount < 5) {
+                        signals[signalCount] = true;
+                        playBeepSound(523, 0.08); // 赤丸点灯音
+                        signalCount++;
+                        lastSignalTime = now;
+                    } else {
+                        gameState = "WAITING_BLACKOUT";
+                        blackoutDelay = random(500, 3000);
+                        lastSignalTime = now;
+                    }
+                }
+            }
+            else if (gameState === "WAITING_BLACKOUT") {
+                setEngineSound(65 + random(-2, 2), 0.2); // 消灯前の緊迫音復元
+
+                if (now - lastSignalTime >= blackoutDelay) {
+                    signals.fill(false);
+                    gameState = "RACING";
+                    timerStart = performance.now();
+                    playBeepSound(1046, 0.15); // スタート消灯音
+                }
+            }
+            else if (gameState === "RACING") {
+                if (!leftShiftPressed && rightShiftPressed) {
+                    triggerSuccess(performance.now());
+                }
+                if (millis() - timerStart > 2000) {
+                    triggerFalseStart(millis());
+                }
+            }
+            else if (gameState === "FINISHED") {
+                // ゴール後のアクセル吹け上がり演出音を完全復元
+                if (rightShiftPressed) {
+                    if (engineFreq < 350) engineFreq += 15;
+                    setEngineSound(engineFreq + random(-5, 5), 0.25);
+                } else {
+                    if (engineFreq > 40) engineFreq -= 10;
+                    setEngineSound(engineFreq, engineFreq <= 40 ? 0 : 0.2);
+                }
+
+                if (now >= stateEndTime) {
+                    resetToReady();
+                }
+            }
+            else if (gameState === "FALSE_START") {
+                setEngineSound(60, 0);
+                if (now >= stateEndTime) {
+                    resetToReady();
+                }
+            }
+        }
+
+        function triggerSuccess(performanceNowTime) {
+            if (gameState === "FINISHED") return;
+
+            reactionTime = performanceNowTime - timerStart;
+            gameState = "FINISHED";
+            stateEndTime = millis() + holdDuration;
+
+            playCounter++;
+            let secTime = reactionTime / 1000;
+            if (secTime < bestTime) bestTime = secTime;
+            history.unshift({ id: playCounter, time: secTime, type: 'SUCCESS' });
+        }
+
+        function updateCarPhysics() {
+            if (gameState === "LIGHTING" || gameState === "WAITING_BLACKOUT" || gameState === "RACING") {
+                carX = lerp(carX, carTargetX, 0.15);
+                carSpeed = 0;
+            }
+            else if (gameState === "FINISHED") {
+                if (rightShiftPressed) {
+                    carSpeed += 0.5;
+                } else {
+                    carSpeed *= 0.95;
+                }
+                carX += carSpeed;
+            }
+            else if (gameState === "FALSE_START") {
+                carX += random(-1, 1);
+            }
+        }
+
+        function resetToReady() {
+            gameState = "READY";
+            carX = -150;
+            carSpeed = 0;
+        }
+
+        function triggerFalseStart(now) {
+            if (gameState === "FALSE_START" || gameState === "FINISHED") return;
+            gameState = "FALSE_START";
+            stateEndTime = now + holdDuration;
+            playBeepSound(220, 0.3); // フライング低音ブザー
+
+            playCounter++;
+            history.unshift({ id: playCounter, time: null, type: 'FAILED' });
+        }
+
+        function drawRoad() {
+            let mainWidth = 720;
+            let roadY = carY + 25;
+
+            stroke(100);
+            strokeWeight(3);
+            line(0, roadY, mainWidth, roadY);
+            line(0, roadY - 40, mainWidth, roadY - 40);
+
+            stroke(150);
+            strokeWeight(2);
+            let lineX = carTargetX + 85;
+            for (let i = roadY - 40; i < roadY; i += 10) {
+                line(lineX, i, lineX, i + 5);
+            }
+
+            noStroke();
+            push();
+            translate(carX, carY);
+
+            if (gameState === "FALSE_START") fill(255, 50, 50);
+            else fill(255, 220, 0);
+
+            rect(0, 12, 15, 8);
+            rect(10, 15, 60, 10);
+            rect(25, 7, 20, 10);
+            rect(70, 18, 15, 7);
+
+            fill(0);
+            rect(15, 17, 12, 10);
+            rect(55, 17, 10, 10);
+            pop();
+        }
+
+        function drawUI() {
+            let mainWidth = 720;
+
+            fill(255, 0, 255);
+            textSize(22);
+            textStyle(NORMAL);
+            let bestText = bestTime === Infinity ? "0.000 秒" : bestTime.toFixed(3) + " 秒";
+            text("🏆 BEST: " + bestText, mainWidth / 2, 25);
+
+            if (gameState === "READY") {
+                textSize(18);
+                fill(0, 255, 100);
+                text("【左側】長押し / [左Shift] 長押しで開始", mainWidth / 2, 60);
+            } else if (gameState === "LIGHTING" || gameState === "WAITING_BLACKOUT") {
+                textSize(16);
+                fill(255, 255, 0);
+                text("消灯で『左を離して右を押せ！』", mainWidth / 2, 60);
+            }
+
+            let startX = mainWidth / 2 - 200;
+            for (let i = 0; i < 5; i++) {
+                fill(40);
+                stroke(80);
+                strokeWeight(1);
+                rect(startX + i * 100 - 25, 80, 50, 80, 8);
+
+                noStroke();
+                if (signals[i]) {
+                    fill(255, 0, 0);
+                    drawingContext.shadowBlur = 20;
+                    drawingContext.shadowColor = 'red';
+                } else {
+                    fill(40, 5, 5);
+                    drawingContext.shadowBlur = 0;
+                }
+                ellipse(startX + i * 100, 120, 32, 32);
+                drawingContext.shadowBlur = 0;
+            }
+
+            textSize(40);
+            if (gameState === "RACING") {
+                fill(255);
+                text("0.000 秒", mainWidth / 2, 215);
+            }
+            else if (gameState === "FINISHED") {
+                fill(0, 255, 100);
+                text("GO!!  " + (reactionTime / 1000).toFixed(3) + " 秒", mainWidth / 2, 215);
+                drawHoldBar(mainWidth);
+            }
+            else if (gameState === "FALSE_START") {
+                fill(255, 0, 0);
+                text("Failed (フライング)", mainWidth / 2, 215);
+                drawHoldBar(mainWidth);
+            }
+
+            let uiY = 390;
+            stroke(60);
+            strokeWeight(1);
+            line(20, uiY - 25, mainWidth - 20, uiY - 25);
+
+            stroke(40);
+            line(mainWidth / 2, uiY - 15, mainWidth / 2, uiY + 40);
+
+            noStroke();
+            fill(100);
+            textSize(11);
+            text("INPUT ZONE & STATUS PANEL", mainWidth / 2, uiY - 35);
+
+            if (leftShiftPressed) {
+                fill(230, 50, 50);
+                rect(40, uiY - 15, mainWidth / 2 - 60, 35, 6);
+                fill(255); textStyle(BOLD);
+                text("● BRAKE ACTIVE", mainWidth / 4 + 10, uiY + 2);
+            } else {
+                fill(35);
+                rect(40, uiY - 15, mainWidth / 2 - 60, 35, 6);
+                fill(120); textStyle(NORMAL);
+                text("LEFT SIDE [BRAKE]", mainWidth / 4 + 10, uiY + 2);
+            }
+
+            if (rightShiftPressed) {
+                fill(50, 200, 50);
+                rect(mainWidth / 2 + 20, uiY - 15, mainWidth / 2 - 60, 35, 6);
+                fill(255); textStyle(BOLD);
+                text("▲ ACCEL ACTIVE", mainWidth * 0.75 - 10, uiY + 2);
+            } else {
+                fill(35);
+                rect(mainWidth / 2 + 20, uiY - 15, mainWidth / 2 - 60, 35, 6);
+                fill(120); textStyle(NORMAL);
+                text("RIGHT SIDE [ACCEL]", mainWidth * 0.75 - 10, uiY + 2);
+            }
+            textStyle(NORMAL);
+        }
+
+        function drawHistory() {
+            let startX = 740;
+            stroke(60);
+            strokeWeight(2);
+            line(startX - 10, 20, startX - 10, height - 20);
+
+            noStroke();
+            fill(180);
+            textSize(14);
+            textAlign(LEFT, TOP);
+            text("HISTORY (最新10件)", startX, 20);
+
+            textSize(13);
+            let maxDisplay = min(history.length, 10);
+            for (let i = 0; i < maxDisplay; i++) {
+                let item = history[i];
+                let posY = 50 + i * 35;
+
+                fill(30);
+                rect(startX, posY - 4, 190, 28, 4);
+
+                if (item.type === 'SUCCESS') {
+                    fill(200);
+                    text(`#${item.id}: `, startX + 10, posY);
+
+                    if (item.time === bestTime) fill(255, 0, 255);
+                    else fill(0, 255, 100);
+                    text(`${item.time.toFixed(3)} 秒`, startX + 60, posY);
+                } else {
+                    fill(150);
+                    text(`#${item.id}: `, startX + 10, posY);
+                    fill(255, 50, 50);
+                    text("Failed", startX + 60, posY);
+                }
+            }
+            textAlign(CENTER, CENTER);
+        }
+
+        function drawHoldBar(mainWidth) {
+            let timeLeft = stateEndTime - millis();
+            if (timeLeft > 0) {
+                let barWidth = map(timeLeft, 0, holdDuration, 0, 200);
+                fill(40);
+                noStroke();
+                rect(mainWidth / 2 - 100, 245, 200, 5, 3);
+                fill(255, 0, 255);
+                rect(mainWidth / 2 - 100, 245, barWidth, 5, 3);
+            }
+        }
+    </script>
+</body>
+
+</html>
