@@ -3,9 +3,8 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport"
-        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>Racing Reflex Timer (v24 - Mobile & Mac Perfect)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Racing Reflex Timer (v23 - Audio Fixed Complete)</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
     <style>
         body {
@@ -22,9 +21,6 @@
             -webkit-user-select: none;
             user-select: none;
             touch-action: none;
-            /* iPhoneのセーフエリア（ホームインジケータ）分の余白を確保 */
-            padding-bottom: env(safe-area-inset-bottom);
-            box-sizing: border-box;
         }
 
         #canvas-container {
@@ -34,9 +30,6 @@
             display: flex;
             justify-content: center;
             align-items: center;
-            max-width: 96%;
-            max-height: 90%;
-            /* 下部バーに被らないよう少し小さめに制限 */
         }
     </style>
 </head>
@@ -64,12 +57,12 @@
         let bestTime = Infinity;
         let playCounter = 0;
 
-        // 結合一元管理フラグ
+        // キー・タッチの状態管理（一元管理用）
         let leftShiftPressed = false;
         let rightShiftPressed = false;
         let lastLeftShiftState = false;
 
-        // 物理入力の個別独立管理（キーボード・タッチの競合バグを根絶）
+        // 物理入力フラグ（競合・上書き防止）
         let kbdLeftPressed = false;
         let kbdRightPressed = false;
         let touchLeftPressed = false;
@@ -89,7 +82,7 @@
         const V_HEIGHT = 450;
 
         // =========================================================================
-        // 🔊 【音響完全復元】iOS Safari / Mac 対応内蔵サウンドシステム
+        // 🔊 【完全復活】内蔵サウンドシステム (Web Audio API)
         // =========================================================================
         let audioCtx = null;
         let engineOsc = null;
@@ -153,71 +146,39 @@
             canvas.parent('canvas-container');
             textAlign(CENTER, CENTER);
 
-            // --- 【PC用】キーボードリスナー ---
+            // --- PC用：キーボードイベントリスナー（最優先・ブラウザブロック解除） ---
             window.addEventListener('keydown', function (e) {
+                // キーが押された瞬間に最優先でブラウザのオーディオロックを解除
                 resumeAudioContext();
-                if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') e.preventDefault();
+
+                if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+                    e.preventDefault();
+                }
 
                 let now = performance.now();
-                if (e.code === 'ShiftLeft') { kbdLeftPressed = true; handleLeftPress(now); }
-                if (e.code === 'ShiftRight') { kbdRightPressed = true; handleRightPress(now); }
+                if (e.code === 'ShiftLeft') {
+                    kbdLeftPressed = true;
+                    handleLeftPress(now);
+                }
+                if (e.code === 'ShiftRight') {
+                    kbdRightPressed = true;
+                    handleRightPress(now);
+                }
             }, { passive: false });
 
             window.addEventListener('keyup', function (e) {
-                if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') e.preventDefault();
-                let now = performance.now();
-                if (e.code === 'ShiftLeft') { kbdLeftPressed = false; handleLeftRelease(now); }
-                if (e.code === 'ShiftRight') { kbdRightPressed = false; handleRightRelease(now); }
-            }, { passive: false });
-
-            // --- 【スマホ用】Safariの誤作動・ゴーストタッチを根絶するネイティブイベント ---
-            let container = document.getElementById('canvas-container');
-
-            container.addEventListener('touchstart', function (e) {
-                resumeAudioContext(); // タッチした瞬間に音声を強制アクティブ化
-                e.preventDefault();
-
-                let now = performance.now();
-                // 発生したすべてのタッチポイントを正確に再スキャン
-                let currentLeft = false;
-                let currentRight = false;
-
-                for (let i = 0; i < e.touches.length; i++) {
-                    // クライアントのキャンバス内座標から正確に左右分割判定
-                    let rect = container.getBoundingClientRect();
-                    let touchX = e.touches[i].clientX - rect.left;
-                    if (touchX < rect.width / 2) currentLeft = true;
-                    else currentRight = true;
+                if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+                    e.preventDefault();
                 }
-
-                if (currentLeft && !touchLeftPressed) { touchLeftPressed = true; handleLeftPress(now); }
-                if (currentRight && !touchRightPressed) { touchRightPressed = true; handleRightPress(now); }
-            }, { passive: false });
-
-            container.addEventListener('touchend', function (e) {
-                e.preventDefault();
                 let now = performance.now();
-
-                let currentLeft = false;
-                let currentRight = false;
-
-                for (let i = 0; i < e.touches.length; i++) {
-                    let rect = container.getBoundingClientRect();
-                    let touchX = e.touches[i].clientX - rect.left;
-                    if (touchX < rect.width / 2) currentLeft = true;
-                    else currentRight = true;
+                if (e.code === 'ShiftLeft') {
+                    kbdLeftPressed = false;
+                    handleLeftRelease(now);
                 }
-
-                if (!currentLeft && touchLeftPressed) { touchLeftPressed = false; handleLeftRelease(now); }
-                if (!currentRight && touchRightPressed) { touchRightPressed = false; handleRightRelease(now); }
-            }, { passive: false });
-
-            container.addEventListener('touchcancel', function (e) {
-                // 画面外に指が逃げた場合なども安全に全解除してフリーズを防ぐ
-                touchLeftPressed = false;
-                touchRightPressed = false;
-                handleLeftRelease(performance.now());
-                handleRightRelease(performance.now());
+                if (e.code === 'ShiftRight') {
+                    kbdRightPressed = false;
+                    handleRightRelease(now);
+                }
             }, { passive: false });
         }
 
@@ -229,14 +190,11 @@
         let currentWidth, currentHeight;
         function calculateCanvasSize() {
             let ratio = V_WIDTH / V_HEIGHT;
-            // インジケータを避けるため、縦幅に安全マージン(35px)を適用
-            let safeWindowHeight = windowHeight - 35;
-
-            if (windowWidth / safeWindowHeight > ratio) {
-                currentHeight = safeWindowHeight;
+            if (windowWidth / windowHeight > ratio) {
+                currentHeight = windowHeight - 10;
                 currentWidth = currentHeight * ratio;
             } else {
-                currentWidth = windowWidth;
+                currentWidth = windowWidth - 10;
                 currentHeight = currentWidth / ratio;
             }
         }
@@ -274,13 +232,57 @@
                 rightShiftPressed = false;
             }
         }
+
+        // --- 【バグ修正】PC環境の時はスキャンをスキップしてオーディオ干渉を防ぐタッチスキャン ---
+        function checkTouches() {
+            // PC環境（タッチ配列が空）のときは、スマホ用の状態更新処理を完全にパスさせて音源保護
+            if (touches.length === 0) {
+                // キーボードもタッチも押されていない場合はフラグをクリーンに保つ
+                if (!kbdLeftPressed) touchLeftPressed = false;
+                if (!kbdRightPressed) touchRightPressed = false;
+                return;
+            }
+
+            resumeAudioContext();
+            let now = performance.now();
+            let currentLeftTouch = false;
+            let currentRightTouch = false;
+
+            for (let i = 0; i < touches.length; i++) {
+                if (touches[i].x < width / 2) {
+                    currentLeftTouch = true;
+                } else {
+                    currentRightTouch = true;
+                }
+            }
+
+            if (currentLeftTouch && !touchLeftPressed) {
+                touchLeftPressed = true;
+                handleLeftPress(now);
+            }
+            if (!currentLeftTouch && touchLeftPressed) {
+                touchLeftPressed = false;
+                handleLeftRelease(now);
+            }
+
+            if (currentRightTouch && !touchRightPressed) {
+                touchRightPressed = true;
+                handleRightPress(now);
+            }
+            if (!currentRightTouch && touchRightPressed) {
+                touchRightPressed = false;
+                handleRightRelease(now);
+            }
+        }
         // =========================================================================
 
         function draw() {
+            // 毎フレームのタッチスキャン（PC時は安全にパスされます）
+            checkTouches();
+
             background(20);
 
             push();
-            // 画面解像度に合わせてダイナミックにスケーリング描画
             scale(width / V_WIDTH, height / V_HEIGHT);
 
             updateGameLogic();
@@ -298,7 +300,7 @@
             let now = millis();
 
             if (gameState === "READY") {
-                setEngineSound(60, 0);
+                setEngineSound(60, 0); // アイドリング音完全停止
 
                 if (leftShiftPressed && !lastLeftShiftState && !rightShiftPressed) {
                     gameState = "LIGHTING";
@@ -307,16 +309,16 @@
                     signals.fill(false);
 
                     engineFreq = 50;
-                    setEngineSound(engineFreq, 0.2);
+                    setEngineSound(engineFreq, 0.2); // 低音エンジン始動音復元
                 }
             }
             else if (gameState === "LIGHTING") {
-                setEngineSound(50 + sin(now * 0.05) * 3, 0.2);
+                setEngineSound(50 + sin(now * 0.05) * 3, 0.2); // カウントダウン中のうねり音復元
 
                 if (now - lastSignalTime >= 1000) {
                     if (signalCount < 5) {
                         signals[signalCount] = true;
-                        playBeepSound(523, 0.08);
+                        playBeepSound(523, 0.08); // 赤丸点灯音
                         signalCount++;
                         lastSignalTime = now;
                     } else {
@@ -327,13 +329,13 @@
                 }
             }
             else if (gameState === "WAITING_BLACKOUT") {
-                setEngineSound(65 + random(-2, 2), 0.2);
+                setEngineSound(65 + random(-2, 2), 0.2); // 消灯前の緊迫音復元
 
                 if (now - lastSignalTime >= blackoutDelay) {
                     signals.fill(false);
                     gameState = "RACING";
                     timerStart = performance.now();
-                    playBeepSound(1046, 0.15);
+                    playBeepSound(1046, 0.15); // スタート消灯音
                 }
             }
             else if (gameState === "RACING") {
@@ -345,6 +347,7 @@
                 }
             }
             else if (gameState === "FINISHED") {
+                // ゴール後のアクセル吹け上がり演出音を完全復元
                 if (rightShiftPressed) {
                     if (engineFreq < 350) engineFreq += 15;
                     setEngineSound(engineFreq + random(-5, 5), 0.25);
@@ -406,7 +409,7 @@
             if (gameState === "FALSE_START" || gameState === "FINISHED") return;
             gameState = "FALSE_START";
             stateEndTime = now + holdDuration;
-            playBeepSound(220, 0.3);
+            playBeepSound(220, 0.3); // フライング低音ブザー
 
             playCounter++;
             history.unshift({ id: playCounter, time: null, type: 'FAILED' });
