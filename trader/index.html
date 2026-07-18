@@ -173,13 +173,21 @@
             overscroll-behavior-x: contain;
             scrollbar-color: #7f8c8d #ecf0f1;
             scrollbar-width: auto;
-            touch-action: pan-y;
+            touch-action: pan-x pan-y;
             padding-bottom: 6px;
-            margin-bottom: 15px;
+        }
+
+        .stock-scroll-control {
+            display: block;
+            width: 100%;
+            height: 24px;
+            margin: 2px 0 15px;
+            accent-color: #7f8c8d;
+            cursor: pointer;
         }
 
         .stock-grid::-webkit-scrollbar {
-            height: 12px;
+            height: 20px;
         }
 
         .stock-grid::-webkit-scrollbar-track {
@@ -461,6 +469,10 @@
                 gap: 5px;
             }
 
+            .stock-scroll-control {
+                height: 30px;
+            }
+
             .market-panel {
                 padding: 8px;
             }
@@ -559,6 +571,8 @@
                 </div>
             </div>
             <div class="stock-grid" id="stockGrid"></div>
+            <input class="stock-scroll-control" id="stockScrollControl" type="range" min="0" value="0"
+                aria-label="市場トレンドを横にスクロール">
 
             <!-- 売買エリア -->
             <div class="trade-area">
@@ -1880,6 +1894,15 @@
 
         function setupStockGridScroll() {
             const grid = document.getElementById('stockGrid');
+            const control = document.getElementById('stockScrollControl');
+            const syncControl = () => {
+                const maxScroll = Math.max(0, grid.scrollWidth - grid.clientWidth);
+                control.max = maxScroll;
+                control.value = grid.scrollLeft;
+                control.disabled = maxScroll === 0;
+            };
+            control.addEventListener('input', () => grid.scrollLeft = Number(control.value));
+            grid.addEventListener('scroll', syncControl);
             let pointerId = null;
             let startX = 0;
             let startScrollLeft = 0;
@@ -1909,6 +1932,7 @@
             };
 
             grid.addEventListener('pointerdown', event => {
+                if (event.pointerType !== 'mouse') return;
                 if (inertiaFrame) cancelAnimationFrame(inertiaFrame);
                 pointerId = event.pointerId;
                 startX = event.clientX;
@@ -2190,6 +2214,11 @@
                 chip.onclick = () => selectStock(stock.id);
                 grid.appendChild(chip);
             });
+            const control = document.getElementById('stockScrollControl');
+            const maxScroll = Math.max(0, grid.scrollWidth - grid.clientWidth);
+            control.max = maxScroll;
+            control.value = Math.min(grid.scrollLeft, maxScroll);
+            control.disabled = maxScroll === 0;
         }
 
         function renderPortfolioSlots() {
