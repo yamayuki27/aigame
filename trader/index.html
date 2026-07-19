@@ -177,15 +177,6 @@
             padding-bottom: 6px;
         }
 
-        .stock-scroll-control {
-            display: block;
-            width: 100%;
-            height: 24px;
-            margin: 2px 0 15px;
-            accent-color: #7f8c8d;
-            cursor: pointer;
-        }
-
         .stock-grid::-webkit-scrollbar {
             height: 20px;
         }
@@ -233,6 +224,28 @@
         .stock-chip.unaffordable .chip-name,
         .stock-chip.unaffordable .chip-price {
             color: #7f8c8d;
+        }
+
+        .stock-chip.draggable {
+            cursor: grab;
+        }
+
+        .stock-chip.dragging {
+            visibility: hidden;
+        }
+
+        .portfolio-slot.drop-target {
+            border-color: #2ecc71;
+            background: #eafaf1;
+        }
+
+        .stock-drag-ghost {
+            position: fixed;
+            z-index: 10;
+            pointer-events: none;
+            cursor: grabbing;
+            transform: translate(-50%, -50%) translateY(-8px) scale(1.06);
+            box-shadow: 0 10px 18px rgba(44, 62, 80, 0.35);
         }
 
         .chip-name {
@@ -346,19 +359,86 @@
             margin-bottom: 15px;
         }
 
+        .charts-container:empty {
+            display: none;
+        }
+
         .chart-wrapper {
+            display: flex;
+            gap: 8px;
             background: #fff;
-            padding: 5px;
+            padding: 8px;
             border-radius: 8px;
             border: 1px solid #eee;
         }
 
-        .chart-title {
-            font-size: 11px;
+        .chart-content {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .chart-summary {
+            margin-bottom: 4px;
+        }
+
+        .chart-summary-header {
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+            font-size: 12px;
             font-weight: bold;
+            color: #2c3e50;
+        }
+
+        .chart-summary-price {
+            color: #e74c3c;
+            white-space: nowrap;
+        }
+
+        .chart-summary-details {
+            margin-top: 2px;
             color: #7f8c8d;
-            text-align: center;
-            margin-bottom: 2px;
+            font-size: 10px;
+        }
+
+        .chart-summary-desc {
+            margin-top: 2px;
+            color: #7f8c8d;
+            font-size: 10px;
+            line-height: 1.3;
+        }
+
+        .chart-actions {
+            display: flex;
+            align-self: flex-end;
+            flex: 0 0 92px;
+            flex-direction: column;
+            gap: 4px;
+            height: 120px;
+        }
+
+        .chart-action-btn {
+            flex: 1;
+            border: none;
+            border-radius: 4px;
+            color: white;
+            font-size: 10px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .chart-action-btn.buy {
+            background: #2ecc71;
+        }
+
+        .chart-action-btn.sell {
+            background: #e74c3c;
+        }
+
+        .chart-action-btn:disabled {
+            background: #bdc3c7;
+            cursor: not-allowed;
+            opacity: 0.5;
         }
 
         /* 進行ボタン */
@@ -469,10 +549,6 @@
                 gap: 5px;
             }
 
-            .stock-scroll-control {
-                height: 30px;
-            }
-
             .market-panel {
                 padding: 8px;
             }
@@ -539,6 +615,22 @@
     <div class="container">
         <h1>📈 ホットワード投資ゲーム</h1>
 
+        <!-- 市場エリア -->
+        <div class="market-panel">
+            <div class="market-header">
+                <h2>🌐 市場トレンド</h2>
+                <div class="category-tabs">
+                    <button class="category-tab active" data-category="food"
+                        onclick="selectCategory('food')">食品</button>
+                    <button class="category-tab" data-category="vegetable"
+                        onclick="selectCategory('vegetable')">野菜</button>
+                </div>
+            </div>
+            <div class="stock-grid" id="stockGrid"></div>
+        </div>
+
+        <div class="charts-container selected-charts-container" id="selectedChartsContainer"></div>
+
         <!-- ステータスバー -->
         <div class="status-bar">
             <div class="status-item">
@@ -555,56 +647,18 @@
             </div>
         </div>
 
+        <!-- 進行ボタン -->
+        <div class="progress-actions">
+            <button class="btn-next-week" onclick="nextWeek()">1週間すすむ</button>
+            <button class="btn-auto-progress" id="btnAutoProgress" onclick="toggleAutoProgress()"
+                aria-pressed="false">自動: OFF</button>
+        </div>
+
         <!-- ポートフォリオ -->
-        <h2>💼 ポートフォリオ (最大3種類)</h2>
+        <h2>💼 保有中の銘柄 (最大3種類)</h2>
         <div class="portfolio-container" id="portfolioSlots"></div>
 
-        <!-- 市場エリア -->
-        <div class="market-panel">
-            <div class="market-header">
-                <h2>🌐 市場トレンド</h2>
-                <div class="category-tabs">
-                    <button class="category-tab active" data-category="food"
-                        onclick="selectCategory('food')">食品</button>
-                    <button class="category-tab" data-category="vegetable"
-                        onclick="selectCategory('vegetable')">野菜</button>
-                </div>
-            </div>
-            <div class="stock-grid" id="stockGrid"></div>
-            <input class="stock-scroll-control" id="stockScrollControl" type="range" min="0" value="0"
-                aria-label="市場トレンドを横にスクロール">
-
-            <!-- 売買エリア -->
-            <div class="trade-area">
-                <div class="trade-header">
-                    <span class="trade-name" id="selectedName">銘柄を選択</span>
-                    <span class="trade-price" id="selectedPrice">--- 円</span>
-                </div>
-                <div class="trade-desc" id="selectedDesc">---</div>
-                <div class="trade-actions">
-                    <div class="btn-row">
-                        <button class="btn btn-buy" id="btnBuy1" onclick="buyStock(1)">1株 買う</button>
-                        <button class="btn btn-buy" id="btnBuy10" onclick="buyStock(10)">10株 買う</button>
-                        <button class="btn btn-buy" id="btnBuy100" onclick="buyStock(100)">100株 買う</button>
-                    </div>
-                    <div class="btn-row">
-                        <button class="btn btn-sell" id="btnSell1" onclick="sellStock(1)">1株 売る</button>
-                        <button class="btn btn-sell" id="btnSell10" onclick="sellStock(10)">10株 売る</button>
-                        <button class="btn btn-sell" id="btnSell100" onclick="sellStock(100)">100株 売る</button>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 進行ボタン -->
-            <div class="progress-actions">
-                <button class="btn-next-week" onclick="nextWeek()">1週間すすむ</button>
-                <button class="btn-auto-progress" id="btnAutoProgress" onclick="toggleAutoProgress()"
-                    aria-pressed="false">自動: OFF</button>
-            </div>
-
-            <!-- 複数グラフ表示エリア -->
-            <div class="charts-container" id="chartsContainer"></div>
-        </div>
+        <div class="charts-container" id="chartsContainer"></div>
 
         <!-- 過去の履歴（アコーディオン） -->
         <details class="history-panel">
@@ -1867,6 +1921,7 @@
         let selectedCategory = 'food';
         let playHistory = [];
         let autoProgressTimer = null;
+        let isStockDragActive = false;
 
         // 特定のインデックス（0〜55）が何月かを計算する関数
         function getMonthForIndex(index) {
@@ -1886,23 +1941,15 @@
             resetPortfolio();
 
             if (yearlyStocksData.length > 0) {
-                selectedStockId = yearlyStocksData.find(stock => stock.category === selectedCategory)?.id;
+                selectedStockId = null;
             }
             setupStockGridScroll();
+            setupStockDragAndDrop();
             updateUI();
         }
 
         function setupStockGridScroll() {
             const grid = document.getElementById('stockGrid');
-            const control = document.getElementById('stockScrollControl');
-            const syncControl = () => {
-                const maxScroll = Math.max(0, grid.scrollWidth - grid.clientWidth);
-                control.max = maxScroll;
-                control.value = grid.scrollLeft;
-                control.disabled = maxScroll === 0;
-            };
-            control.addEventListener('input', () => grid.scrollLeft = Number(control.value));
-            grid.addEventListener('scroll', syncControl);
             let pointerId = null;
             let startX = 0;
             let startScrollLeft = 0;
@@ -1932,7 +1979,7 @@
             };
 
             grid.addEventListener('pointerdown', event => {
-                if (event.pointerType !== 'mouse') return;
+                if (isStockDragActive || event.pointerType !== 'mouse') return;
                 if (inertiaFrame) cancelAnimationFrame(inertiaFrame);
                 pointerId = event.pointerId;
                 startX = event.clientX;
@@ -1944,7 +1991,7 @@
             });
 
             grid.addEventListener('pointermove', event => {
-                if (event.pointerId !== pointerId) return;
+                if (isStockDragActive || event.pointerId !== pointerId) return;
                 const distance = event.clientX - startX;
                 if (Math.abs(distance) > 4 && !isDragging) {
                     isDragging = true;
@@ -1960,7 +2007,7 @@
             });
 
             const endDrag = event => {
-                if (event.pointerId !== pointerId) return;
+                if (isStockDragActive || event.pointerId !== pointerId) return;
                 if (isDragging && grid.hasPointerCapture(pointerId)) grid.releasePointerCapture(pointerId);
                 pointerId = null;
                 if (!isDragging) return;
@@ -1976,6 +2023,111 @@
                 event.preventDefault();
                 event.stopPropagation();
             }, true);
+        }
+
+        function setupStockDragAndDrop() {
+            const grid = document.getElementById('stockGrid');
+            let pressTimer = null;
+            let pendingDrag = null;
+            let dragState = null;
+            let resumeAutoProgress = false;
+
+            const clearDropTargets = () => document.querySelectorAll('.portfolio-slot.drop-target').forEach(slot => slot.classList.remove('drop-target'));
+            const clearPress = () => {
+                if (pressTimer) clearTimeout(pressTimer);
+                pressTimer = null;
+                pendingDrag = null;
+            };
+            const finishDrag = () => {
+                if (!dragState) return;
+                if (dragState.chip.hasPointerCapture(dragState.pointerId)) dragState.chip.releasePointerCapture(dragState.pointerId);
+                dragState.chip.classList.remove('dragging');
+                dragState.ghost.remove();
+                clearDropTargets();
+                document.querySelector('.btn-next-week').disabled = false;
+                document.getElementById('btnAutoProgress').disabled = false;
+                isStockDragActive = false;
+                dragState = null;
+                if (resumeAutoProgress) startAutoProgress();
+                resumeAutoProgress = false;
+            };
+            const startDrag = () => {
+                if (!pendingDrag) return;
+                const { chip, pointerId, clientX, clientY } = pendingDrag;
+                pressTimer = null;
+                const stockId = chip.dataset.stockId;
+                const price = getCurrentPrice(stockId);
+                const ownedCount = portfolio[stockId].count;
+                const cannotAddStock = ownedCount === 0 && getActivePortfolioCount() >= MAX_PORTFOLIO_SLOTS;
+                if (funds < price || cannotAddStock) return clearPress();
+                const ghost = chip.cloneNode(true);
+                ghost.className = 'stock-chip stock-drag-ghost';
+                ghost.style.width = `${chip.offsetWidth}px`;
+                ghost.style.height = `${chip.offsetHeight}px`;
+                ghost.style.left = `${clientX}px`;
+                ghost.style.top = `${clientY}px`;
+                document.body.appendChild(ghost);
+                chip.setPointerCapture(pointerId);
+                chip.classList.add('dragging');
+                dragState = { chip, stockId, pointerId, ghost };
+                pendingDrag = null;
+                isStockDragActive = true;
+                resumeAutoProgress = stopAutoProgress();
+                document.querySelector('.btn-next-week').disabled = true;
+                document.getElementById('btnAutoProgress').disabled = true;
+            };
+
+            grid.addEventListener('pointerdown', event => {
+                const chip = event.target.closest('.stock-chip.draggable');
+                if (!chip) return;
+                clearPress();
+                pendingDrag = { chip, pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY };
+                pressTimer = setTimeout(startDrag, 250);
+            });
+            grid.addEventListener('pointermove', event => {
+                if (dragState?.pointerId === event.pointerId) {
+                    event.preventDefault();
+                    dragState.ghost.style.left = `${event.clientX}px`;
+                    dragState.ghost.style.top = `${event.clientY}px`;
+                    clearDropTargets();
+                    const slot = document.elementFromPoint(event.clientX, event.clientY)?.closest('.portfolio-slot');
+                    if (slot) slot.classList.add('drop-target');
+                    return;
+                }
+                if (!pendingDrag || pendingDrag.pointerId !== event.pointerId) return;
+                const distanceX = event.clientX - pendingDrag.clientX;
+                const distanceY = event.clientY - pendingDrag.clientY;
+                if (event.pointerType === 'mouse' && Math.abs(distanceY) > 8 && Math.abs(distanceY) > Math.abs(distanceX)) {
+                    if (pressTimer) clearTimeout(pressTimer);
+                    startDrag();
+                    if (!dragState) return;
+                    event.preventDefault();
+                    dragState.ghost.style.left = `${event.clientX}px`;
+                    dragState.ghost.style.top = `${event.clientY}px`;
+                    clearDropTargets();
+                    const slot = document.elementFromPoint(event.clientX, event.clientY)?.closest('.portfolio-slot');
+                    if (slot) slot.classList.add('drop-target');
+                    return;
+                }
+                if (Math.hypot(distanceX, distanceY) > 8) clearPress();
+            });
+            const endDrag = event => {
+                if (dragState?.pointerId === event.pointerId) {
+                    const slot = event.type === 'pointerup'
+                        ? document.elementFromPoint(event.clientX, event.clientY)?.closest('.portfolio-slot')
+                        : null;
+                    const stockId = dragState.stockId;
+                    finishDrag();
+                    if (slot) {
+                        selectedStockId = stockId;
+                        buyStock(1);
+                    }
+                    return;
+                }
+                if (pendingDrag?.pointerId === event.pointerId) clearPress();
+            };
+            grid.addEventListener('pointerup', endDrag);
+            grid.addEventListener('pointercancel', endDrag);
         }
 
         // --- ランダム価格変動生成（過去2ヶ月 ＋ 未来12ヶ月） ---
@@ -2087,20 +2239,29 @@
             }
         }
 
-        function sellStock(amount) {
+        function buyAllStock() {
             if (!selectedStockId) return;
-            const currentOwned = portfolio[selectedStockId].count;
-            if (currentOwned <= 0) return;
+            const amount = Math.floor(funds / getCurrentPrice(selectedStockId));
+            if (amount > 0) buyStock(amount);
+        }
 
-            let sellAmount = amount;
-            if (sellAmount > currentOwned) sellAmount = currentOwned;
+        function sellAllSelectedStock() {
+            if (selectedStockId) sellAllFromPortfolio(selectedStockId);
+        }
 
-            const price = getCurrentPrice(selectedStockId);
-            funds += price * sellAmount;
-            portfolio[selectedStockId].count -= sellAmount;
+        function buyStockFor(stockId, amount) {
+            selectedStockId = stockId;
+            buyStock(amount);
+        }
 
-            if (portfolio[selectedStockId].count === 0) portfolio[selectedStockId].avgPrice = 0;
-            updateUI();
+        function buyAllStockFor(stockId) {
+            selectedStockId = stockId;
+            buyAllStock();
+        }
+
+        function sellAllStockFor(stockId) {
+            selectedStockId = stockId;
+            sellAllFromPortfolio(stockId);
         }
 
         function sellAllFromPortfolio(stockId) {
@@ -2114,21 +2275,29 @@
             }
         }
 
-        function toggleAutoProgress() {
+        function startAutoProgress() {
+            if (autoProgressTimer) return;
             const button = document.getElementById('btnAutoProgress');
-            if (autoProgressTimer) {
-                clearInterval(autoProgressTimer);
-                autoProgressTimer = null;
-                button.textContent = '自動: OFF';
-                button.classList.remove('active');
-                button.setAttribute('aria-pressed', 'false');
-                return;
-            }
-
             autoProgressTimer = setInterval(() => nextWeek(true), 10000);
             button.textContent = '自動: ON';
             button.classList.add('active');
             button.setAttribute('aria-pressed', 'true');
+        }
+
+        function stopAutoProgress() {
+            if (!autoProgressTimer) return false;
+            const button = document.getElementById('btnAutoProgress');
+            clearInterval(autoProgressTimer);
+            autoProgressTimer = null;
+            button.textContent = '自動: OFF';
+            button.classList.remove('active');
+            button.setAttribute('aria-pressed', 'false');
+            return true;
+        }
+
+        function toggleAutoProgress() {
+            if (autoProgressTimer) stopAutoProgress();
+            else startAutoProgress();
         }
 
         // --- ターン進行と年越し ---
@@ -2152,6 +2321,7 @@
                 currentYear++;
                 currentWeek = 0;
                 funds = INITIAL_FUNDS;
+                selectedStockId = null;
                 startMonth = Math.floor(Math.random() * 12) + 1;
 
                 generateYearlyPrices();
@@ -2163,7 +2333,7 @@
         // --- UI描画系 ---
         function selectCategory(category) {
             selectedCategory = category;
-            selectedStockId = yearlyStocksData.find(stock => stock.category === selectedCategory)?.id ?? null;
+            selectedStockId = null;
             document.getElementById('stockGrid').scrollLeft = 0;
             updateUI();
         }
@@ -2180,6 +2350,8 @@
             yearlyStocksData.filter(stock => stock.category === selectedCategory).forEach(stock => {
                 const chip = document.createElement('div');
                 chip.className = 'stock-chip';
+                chip.dataset.stockId = stock.id;
+                chip.dataset.stockName = stock.name;
                 if (stock.id === selectedStockId) chip.classList.add('selected');
 
                 const currentPrice = getCurrentPrice(stock.id);
@@ -2187,6 +2359,7 @@
                 const cannotAddStock = pData.count === 0 && getActivePortfolioCount() >= MAX_PORTFOLIO_SLOTS;
                 const cannotBuyStock = funds < currentPrice || cannotAddStock;
                 if (cannotBuyStock) chip.classList.add('unaffordable');
+                else chip.classList.add('draggable');
                 const fourWeekChange = getFourWeekChange(stock.id);
                 const trendHtml = fourWeekChange >= 0.25
                     ? '<span class="diff-plus" aria-label="直近4週平均から25%以上上昇">↑</span>'
@@ -2214,11 +2387,6 @@
                 chip.onclick = () => selectStock(stock.id);
                 grid.appendChild(chip);
             });
-            const control = document.getElementById('stockScrollControl');
-            const maxScroll = Math.max(0, grid.scrollWidth - grid.clientWidth);
-            control.max = maxScroll;
-            control.value = Math.min(grid.scrollLeft, maxScroll);
-            control.disabled = maxScroll === 0;
         }
 
         function renderPortfolioSlots() {
@@ -2286,25 +2454,6 @@
             renderStockGrid();
             renderPortfolioSlots();
             renderHistory();
-
-            if (selectedStockId) {
-                const stock = yearlyStocksData.find(s => s.id === selectedStockId);
-                const price = getCurrentPrice(selectedStockId);
-
-                document.getElementById('selectedName').textContent = stock.name;
-                document.getElementById('selectedDesc').textContent = stock.description;
-                document.getElementById('selectedPrice').textContent = `${price.toLocaleString()}円`;
-
-                document.getElementById('btnBuy1').disabled = (funds < price);
-                document.getElementById('btnBuy10').disabled = (funds < price * 10);
-                document.getElementById('btnBuy100').disabled = (funds < price * 100);
-
-                const ownedCount = portfolio[selectedStockId].count;
-                document.getElementById('btnSell1').disabled = (ownedCount < 1);
-                document.getElementById('btnSell10').disabled = (ownedCount < 10);
-                document.getElementById('btnSell100').disabled = (ownedCount < 100);
-            }
-
             drawMultipleCharts();
         }
 
@@ -2313,27 +2462,50 @@
             chartInstances = [];
 
             const container = document.getElementById('chartsContainer');
+            const selectedContainer = document.getElementById('selectedChartsContainer');
             container.innerHTML = '';
+            selectedContainer.innerHTML = '';
 
             let targetStocks = [];
-            if (selectedStockId) {
-                targetStocks.push(yearlyStocksData.find(s => s.id === selectedStockId));
+            if (selectedStockId && portfolio[selectedStockId].count === 0) {
+                targetStocks.push({ stock: yearlyStocksData.find(s => s.id === selectedStockId), container: selectedContainer, actionMode: 'buyOne' });
             }
-            Object.keys(portfolio).forEach(id => {
-                if (portfolio[id].count > 0 && id !== selectedStockId) {
-                    targetStocks.push(yearlyStocksData.find(s => s.id === id));
-                }
-            });
+            Object.keys(portfolio)
+                .filter(id => portfolio[id].count > 0)
+                .slice(0, MAX_PORTFOLIO_SLOTS)
+                .forEach(id => targetStocks.push({ stock: yearlyStocksData.find(s => s.id === id), container, actionMode: 'full' }));
 
             // X軸のラベル（合計56週分）を生成
             const labels = Array.from({ length: TOTAL_WEEKS }, (_, i) => getMonthForIndex(i) + '月');
 
-            targetStocks.forEach(stock => {
+            targetStocks.forEach(({ stock, container, actionMode }) => {
+                const price = getCurrentPrice(stock.id);
+                const pData = portfolio[stock.id];
+                const ownedCount = pData.count;
+                const currentValue = ownedCount * price;
+                const diff = price - pData.avgPrice;
+                const diffStr = diff >= 0 ? `+${Math.floor(diff)}` : Math.floor(diff);
+                const diffClass = diff >= 0 ? 'diff-plus' : 'diff-minus';
+                const cannotAddStock = ownedCount === 0 && getActivePortfolioCount() >= MAX_PORTFOLIO_SLOTS;
+                const canBuy = funds >= price && !cannotAddStock;
                 const wrapper = document.createElement('div');
                 wrapper.className = 'chart-wrapper';
                 wrapper.innerHTML = `
-                <div class="chart-title">${stock.name}</div>
-                <canvas width="500" height="120"></canvas>
+                <div class="chart-content">
+                    <div class="chart-summary">
+                        <div class="chart-summary-header"><span>${stock.name}</span><span class="chart-summary-price">${price.toLocaleString()}円</span></div>
+                        <div class="chart-summary-details">${ownedCount > 0 ? `${ownedCount}株・評価 ${currentValue.toLocaleString()}円 (<span class="${diffClass}">${diffStr}円</span>)` : '未保有'}</div>
+                        <div class="chart-summary-desc">${stock.description}</div>
+                    </div>
+                    <canvas width="500" height="120"></canvas>
+                </div>
+                ${actionMode === 'full' ? `<div class="chart-actions">
+                    <button class="chart-action-btn buy" onclick="buyStockFor('${stock.id}', 1)" ${canBuy ? '' : 'disabled'}>1株 買う</button>
+                    <button class="chart-action-btn buy" onclick="buyAllStockFor('${stock.id}')" ${canBuy ? '' : 'disabled'}>買えるだけ</button>
+                    <button class="chart-action-btn sell" onclick="sellAllStockFor('${stock.id}')" ${ownedCount > 0 ? '' : 'disabled'}>全て売る</button>
+                </div>` : actionMode === 'buyOne' ? `<div class="chart-actions">
+                    <button class="chart-action-btn buy" onclick="buyStockFor('${stock.id}', 1)" ${canBuy ? '' : 'disabled'}>1株 買う</button>
+                </div>` : ''}
             `;
                 container.appendChild(wrapper);
 
@@ -2372,6 +2544,7 @@
                             },
                             x: {
                                 ticks: {
+                                    autoSkip: false,
                                     font: { size: 10 },
                                     maxRotation: 0,
                                     callback: function (value, index) {
